@@ -1,0 +1,12 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# Editor junk
+.DS_Store
+*.swp
+*.swo
+.vscode/
+
+# Misc
+*.log
