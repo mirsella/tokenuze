@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "tokenuze", .module = mod },
             },
+            .strip = optimize != .Debug,
         }),
     });
     exe.root_module.link_libc = true;
