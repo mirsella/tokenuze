@@ -873,21 +873,13 @@ fn loadPricing(
         );
     }
 
-    if (pricing.count() == 0) {
-        var fallback_timer = try std.time.Timer.start();
-        try addFallbackPricing(arena, pricing);
-        std.log.info(
-            "codex.loadPricing: inserted fallback pricing in {d:.2}ms (models={d})",
-            .{ nsToMs(fallback_timer.read()), pricing.count() },
-        );
-    } else {
-        var ensure_timer = try std.time.Timer.start();
-        try ensureFallbackPricing(arena, pricing);
-        std.log.info(
-            "codex.loadPricing: ensured fallback pricing in {d:.2}ms",
-            .{nsToMs(ensure_timer.read())},
-        );
-    }
+    const had_pricing = pricing.count() != 0;
+    var fallback_timer = try std.time.Timer.start();
+    try ensureFallbackPricing(arena, pricing);
+    std.log.info(
+        "codex.loadPricing: {s} fallback pricing in {d:.2}ms (models={d})",
+        .{ if (had_pricing) "ensured" else "inserted", nsToMs(fallback_timer.read()), pricing.count() },
+    );
 
     std.log.info(
         "codex.loadPricing completed in {d:.2}ms (models={d})",
@@ -956,14 +948,6 @@ fn addPricingFromJson(
         .cached_input_cost_per_m = cached * Model.MILLION,
         .output_cost_per_m = output * Model.MILLION,
     });
-}
-
-fn addFallbackPricing(arena: std.mem.Allocator, pricing: *Model.PricingMap) !void {
-    for (FALLBACK_PRICING) |fallback| {
-        if (pricing.get(fallback.name) != null) continue;
-        const key = try arena.dupe(u8, fallback.name);
-        try pricing.put(key, fallback.pricing);
-    }
 }
 
 fn ensureFallbackPricing(arena: std.mem.Allocator, pricing: *Model.PricingMap) !void {
