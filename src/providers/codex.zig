@@ -28,8 +28,30 @@ pub fn collect(
     events: *std.ArrayListUnmanaged(Model.TokenUsageEvent),
     pricing: *Model.PricingMap,
 ) !void {
+    var total_timer = try std.time.Timer.start();
+
+    var events_timer = try std.time.Timer.start();
+    const before_events = events.items.len;
     try collectEvents(allocator, arena, events);
+    const after_events = events.items.len;
+    std.log.info(
+        "codex.collectEvents produced {d} new events in {d:.2}ms",
+        .{ after_events - before_events, nsToMs(events_timer.read()) },
+    );
+
+    var pricing_timer = try std.time.Timer.start();
+    const before_pricing = pricing.count();
     try loadPricing(arena, allocator, pricing);
+    const after_pricing = pricing.count();
+    std.log.info(
+        "codex.loadPricing added {d} pricing models (total={d}) in {d:.2}ms",
+        .{ after_pricing - before_pricing, after_pricing, nsToMs(pricing_timer.read()) },
+    );
+
+    std.log.info(
+        "codex.collect completed in {d:.2}ms",
+        .{nsToMs(total_timer.read())},
+    );
 }
 
 fn collectEvents(
@@ -37,10 +59,23 @@ fn collectEvents(
     arena: std.mem.Allocator,
     events: *std.ArrayListUnmanaged(Model.TokenUsageEvent),
 ) !void {
-    const sessions_dir = resolveSessionsDir(allocator) catch return;
+    var timer = try std.time.Timer.start();
+    var files_processed: usize = 0;
+    var events_added: usize = 0;
+
+    const sessions_dir = resolveSessionsDir(allocator) catch |err| {
+        std.log.info("codex.collectEvents: skipping, unable to resolve sessions dir ({s})", .{@errorName(err)});
+        return;
+    };
     defer allocator.free(sessions_dir);
 
-    var root_dir = std.fs.openDirAbsolute(sessions_dir, .{ .iterate = true }) catch return;
+    var root_dir = std.fs.openDirAbsolute(sessions_dir, .{ .iterate = true }) catch |err| {
+        std.log.info(
+            "codex.collectEvents: skipping, unable to open sessions dir '{s}' ({s})",
+            .{ sessions_dir, @errorName(err) },
+        );
+        return;
+    };
     defer root_dir.close();
 
     var walker = try root_dir.walk(allocator);
@@ -50,6 +85,7 @@ fn collectEvents(
         if (entry.kind != .file) continue;
         const relative_path = std.mem.sliceTo(entry.path, 0);
         if (!std.mem.endsWith(u8, relative_path, JSON_EXT)) continue;
+        files_processed += 1;
 
         const session_id_slice = relative_path[0 .. relative_path.len - JSON_EXT.len];
         const session_id = try arena.dupe(u8, session_id_slice);
@@ -57,8 +93,15 @@ fn collectEvents(
         const absolute_path = try std.fs.path.join(allocator, &.{ sessions_dir, relative_path });
         defer allocator.free(absolute_path);
 
+        const before = events.items.len;
         try parseSessionFile(allocator, arena, session_id, absolute_path, events);
+        events_added += events.items.len - before;
     }
+
+    std.log.info(
+        "codex.collectEvents: scanned {d} files, added {d} events in {d:.2}ms",
+        .{ files_processed, events_added, nsToMs(timer.read()) },
+    );
 }
 
 fn resolveSessionsDir(allocator: std.mem.Allocator) ![]u8 {
@@ -247,13 +290,49 @@ fn loadPricing(
     allocator: std.mem.Allocator,
     pricing: *Model.PricingMap,
 ) !void {
-    fetchRemotePricing(arena, allocator, pricing) catch {};
+    var total_timer = try std.time.Timer.start();
+
+    const before_fetch = pricing.count();
+    var fetch_timer = try std.time.Timer.start();
+    var fetch_ok = true;
+    var fetch_error: ?anyerror = null;
+    fetchRemotePricing(arena, allocator, pricing) catch |err| {
+        fetch_ok = false;
+        fetch_error = err;
+    };
+    const fetch_elapsed = nsToMs(fetch_timer.read());
+    if (fetch_ok) {
+        std.log.info(
+            "codex.loadPricing: remote pricing fetched in {d:.2}ms (models += {d})",
+            .{ fetch_elapsed, pricing.count() - before_fetch },
+        );
+    } else {
+        std.log.warn(
+            "codex.loadPricing: remote pricing failed after {d:.2}ms ({s})",
+            .{ fetch_elapsed, @errorName(fetch_error.?) },
+        );
+    }
 
     if (pricing.count() == 0) {
+        var fallback_timer = try std.time.Timer.start();
         try addFallbackPricing(arena, pricing);
+        std.log.info(
+            "codex.loadPricing: inserted fallback pricing in {d:.2}ms (models={d})",
+            .{ nsToMs(fallback_timer.read()), pricing.count() },
+        );
     } else {
+        var ensure_timer = try std.time.Timer.start();
         try ensureFallbackPricing(arena, pricing);
+        std.log.info(
+            "codex.loadPricing: ensured fallback pricing in {d:.2}ms",
+            .{nsToMs(ensure_timer.read())},
+        );
     }
+
+    std.log.info(
+        "codex.loadPricing completed in {d:.2}ms (models={d})",
+        .{ nsToMs(total_timer.read()), pricing.count() },
+    );
 }
 
 fn fetchRemotePricing(
@@ -458,3 +537,7 @@ const CollectWriter = struct {
         return;
     }
 };
+
+fn nsToMs(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
+}

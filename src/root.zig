@@ -2,6 +2,10 @@ const std = @import("std");
 const Model = @import("model.zig");
 const codex = @import("providers/codex.zig");
 
+pub const std_options = .{
+    .log_level = .info,
+};
+
 pub const DateFilters = struct {
     since: ?[10]u8 = null,
     until: ?[10]u8 = null,
@@ -87,6 +91,8 @@ const SummaryTotals = struct {
 };
 
 pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
+    var total_timer = try std.time.Timer.start();
+
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -97,16 +103,27 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
     var pricing_map = Model.PricingMap.init(allocator);
     defer pricing_map.deinit();
 
+    var collect_timer = try std.time.Timer.start();
     try codex.collect(allocator, arena, &events, &pricing_map);
+    std.log.info(
+        "phase.collect completed in {d:.2}ms (events={d}, pricing_models={d})",
+        .{ nsToMs(collect_timer.read()), events.items.len, pricing_map.count() },
+    );
 
     var out_writer = OutputWriter{ .file = std.fs.File.stdout() };
 
     if (events.items.len == 0) {
+        std.log.info("no events to process; total runtime {d:.2}ms", .{nsToMs(total_timer.read())});
         try out_writer.writeAll("{\"days\":[],\"total\":{\"input_tokens\":0,\"cached_input_tokens\":0,\"output_tokens\":0,\"reasoning_output_tokens\":0,\"total_tokens\":0,\"cost_usd\":0.0,\"missing_pricing\":[]}}\n");
         return;
     }
 
+    var sort_events_timer = try std.time.Timer.start();
     std.sort.pdq(Model.TokenUsageEvent, events.items, {}, eventLessThan);
+    std.log.info(
+        "phase.sort_events completed in {d:.2}ms (events={d})",
+        .{ nsToMs(sort_events_timer.read()), events.items.len },
+    );
 
     var summaries = std.ArrayListUnmanaged(DailySummary){};
     defer {
@@ -119,24 +136,51 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
     var date_index = std.StringHashMap(usize).init(allocator);
     defer date_index.deinit();
 
+    var build_timer = try std.time.Timer.start();
     try buildDailySummaries(allocator, arena, events.items, &summaries, &date_index, filters);
+    std.log.info(
+        "phase.build_summaries completed in {d:.2}ms (days={d})",
+        .{ nsToMs(build_timer.read()), summaries.items.len },
+    );
 
     var missing_set = std.StringHashMap(u8).init(allocator);
     defer missing_set.deinit();
 
+    var apply_pricing_timer = try std.time.Timer.start();
     for (summaries.items) |*summary| {
         applyPricing(allocator, summary, &pricing_map, &missing_set);
         std.sort.pdq(ModelSummary, summary.models.items, {}, modelLessThan);
     }
+    std.log.info(
+        "phase.apply_pricing completed in {d:.2}ms (days={d})",
+        .{ nsToMs(apply_pricing_timer.read()), summaries.items.len },
+    );
 
+    var sort_days_timer = try std.time.Timer.start();
     std.sort.pdq(DailySummary, summaries.items, {}, summaryLessThan);
+    std.log.info(
+        "phase.sort_days completed in {d:.2}ms (days={d})",
+        .{ nsToMs(sort_days_timer.read()), summaries.items.len },
+    );
 
     var totals = SummaryTotals.init();
     defer totals.deinit(allocator);
+    var totals_timer = try std.time.Timer.start();
     accumulateTotals(allocator, &summaries, &totals);
     try collectMissingModels(allocator, &missing_set, &totals.missing_pricing);
+    std.log.info(
+        "phase.totals completed in {d:.2}ms (missing_pricing={d})",
+        .{ nsToMs(totals_timer.read()), totals.missing_pricing.items.len },
+    );
 
+    var output_timer = try std.time.Timer.start();
     try writeJson(&out_writer, summaries.items, &totals);
+    std.log.info(
+        "phase.write_json completed in {d:.2}ms (days={d})",
+        .{ nsToMs(output_timer.read()), summaries.items.len },
+    );
+
+    std.log.info("phase.total runtime {d:.2}ms", .{nsToMs(total_timer.read())});
 }
 
 fn buildDailySummaries(
@@ -377,6 +421,10 @@ fn writeUint(writer: anytype, value: u64) !void {
     var buffer: [32]u8 = undefined;
     const text = try std.fmt.bufPrint(&buffer, "{d}", .{value});
     try writer.writeAll(text);
+}
+
+fn nsToMs(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
 }
 
 const OutputWriter = struct {
