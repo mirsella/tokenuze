@@ -93,6 +93,10 @@ const SummaryTotals = struct {
 };
 
 pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
+    const progress_root = std.Progress.start(.{ .root_name = "Tokenuze" });
+    errdefer std.Progress.setStatus(.failure);
+    defer std.Progress.Node.end(progress_root);
+
     var total_timer = try std.time.Timer.start();
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -106,7 +110,11 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
     defer pricing_map.deinit();
 
     var collect_timer = try std.time.Timer.start();
-    try codex.collect(allocator, arena, &events, &pricing_map);
+    {
+        const collect_progress = std.Progress.Node.start(progress_root, "collect codex", 0);
+        defer std.Progress.Node.end(collect_progress);
+        try codex.collect(allocator, arena, &events, &pricing_map, collect_progress);
+    }
     std.log.info(
         "phase.collect completed in {d:.2}ms (events={d}, pricing_models={d})",
         .{ nsToMs(collect_timer.read()), events.items.len, pricing_map.count() },
@@ -116,12 +124,21 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
 
     if (events.items.len == 0) {
         std.log.info("no events to process; total runtime {d:.2}ms", .{nsToMs(total_timer.read())});
-        try out_writer.writeAll("{\"days\":[],\"total\":{\"input_tokens\":0,\"cached_input_tokens\":0,\"output_tokens\":0,\"reasoning_output_tokens\":0,\"total_tokens\":0,\"cost_usd\":0.0,\"missing_pricing\":[]}}\n");
+        {
+            const write_progress = std.Progress.Node.start(progress_root, "write output", 0);
+            defer std.Progress.Node.end(write_progress);
+            try out_writer.writeAll("{\"days\":[],\"total\":{\"input_tokens\":0,\"cached_input_tokens\":0,\"output_tokens\":0,\"reasoning_output_tokens\":0,\"total_tokens\":0,\"cost_usd\":0.0,\"missing_pricing\":[]}}\n");
+        }
+        std.Progress.setStatus(.success);
         return;
     }
 
     var sort_events_timer = try std.time.Timer.start();
-    std.sort.pdq(Model.TokenUsageEvent, events.items, {}, eventLessThan);
+    {
+        const sort_progress = std.Progress.Node.start(progress_root, "sort events", 0);
+        defer std.Progress.Node.end(sort_progress);
+        std.sort.pdq(Model.TokenUsageEvent, events.items, {}, eventLessThan);
+    }
     std.log.info(
         "phase.sort_events completed in {d:.2}ms (events={d})",
         .{ nsToMs(sort_events_timer.read()), events.items.len },
@@ -139,7 +156,11 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
     defer date_index.deinit();
 
     var build_timer = try std.time.Timer.start();
-    try buildDailySummaries(allocator, arena, events.items, &summaries, &date_index, filters);
+    {
+        const build_progress = std.Progress.Node.start(progress_root, "build summaries", 0);
+        defer std.Progress.Node.end(build_progress);
+        try buildDailySummaries(allocator, arena, events.items, &summaries, &date_index, filters);
+    }
     std.log.info(
         "phase.build_summaries completed in {d:.2}ms (days={d})",
         .{ nsToMs(build_timer.read()), summaries.items.len },
@@ -149,9 +170,14 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
     defer missing_set.deinit();
 
     var apply_pricing_timer = try std.time.Timer.start();
-    for (summaries.items) |*summary| {
-        applyPricing(allocator, summary, &pricing_map, &missing_set);
-        std.sort.pdq(ModelSummary, summary.models.items, {}, modelLessThan);
+    {
+        const pricing_progress = std.Progress.Node.start(progress_root, "apply pricing", summaries.items.len);
+        defer std.Progress.Node.end(pricing_progress);
+        for (summaries.items) |*summary| {
+            applyPricing(allocator, summary, &pricing_map, &missing_set);
+            std.sort.pdq(ModelSummary, summary.models.items, {}, modelLessThan);
+            std.Progress.Node.completeOne(pricing_progress);
+        }
     }
     std.log.info(
         "phase.apply_pricing completed in {d:.2}ms (days={d})",
@@ -159,7 +185,11 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
     );
 
     var sort_days_timer = try std.time.Timer.start();
-    std.sort.pdq(DailySummary, summaries.items, {}, summaryLessThan);
+    {
+        const sort_days_progress = std.Progress.Node.start(progress_root, "sort days", 0);
+        defer std.Progress.Node.end(sort_days_progress);
+        std.sort.pdq(DailySummary, summaries.items, {}, summaryLessThan);
+    }
     std.log.info(
         "phase.sort_days completed in {d:.2}ms (days={d})",
         .{ nsToMs(sort_days_timer.read()), summaries.items.len },
@@ -168,21 +198,30 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
     var totals = SummaryTotals.init();
     defer totals.deinit(allocator);
     var totals_timer = try std.time.Timer.start();
-    accumulateTotals(allocator, &summaries, &totals);
-    try collectMissingModels(allocator, &missing_set, &totals.missing_pricing);
+    {
+        const totals_progress = std.Progress.Node.start(progress_root, "totals", 0);
+        defer std.Progress.Node.end(totals_progress);
+        accumulateTotals(allocator, &summaries, &totals);
+        try collectMissingModels(allocator, &missing_set, &totals.missing_pricing);
+    }
     std.log.info(
         "phase.totals completed in {d:.2}ms (missing_pricing={d})",
         .{ nsToMs(totals_timer.read()), totals.missing_pricing.items.len },
     );
 
     var output_timer = try std.time.Timer.start();
-    try writeJson(&out_writer, summaries.items, &totals);
+    {
+        const write_progress = std.Progress.Node.start(progress_root, "write output", 0);
+        defer std.Progress.Node.end(write_progress);
+        try writeJson(&out_writer, summaries.items, &totals);
+    }
     std.log.info(
         "phase.write_json completed in {d:.2}ms (days={d})",
         .{ nsToMs(output_timer.read()), summaries.items.len },
     );
 
     std.log.info("phase.total runtime {d:.2}ms", .{nsToMs(total_timer.read())});
+    std.Progress.setStatus(.success);
 }
 
 fn buildDailySummaries(

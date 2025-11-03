@@ -64,22 +64,29 @@ pub fn collect(
     arena: std.mem.Allocator,
     events: *std.ArrayListUnmanaged(Model.TokenUsageEvent),
     pricing: *Model.PricingMap,
+    progress: std.Progress.Node,
 ) !void {
     var total_timer = try std.time.Timer.start();
 
+    std.Progress.Node.setEstimatedTotalItems(progress, 2);
+
+    const events_progress = std.Progress.Node.start(progress, "scan sessions", 0);
     var events_timer = try std.time.Timer.start();
     const before_events = events.items.len;
-    try collectEvents(allocator, arena, events);
+    try collectEvents(allocator, arena, events, events_progress);
     const after_events = events.items.len;
+    std.Progress.Node.end(events_progress);
     std.log.info(
         "codex.collectEvents produced {d} new events in {d:.2}ms",
         .{ after_events - before_events, nsToMs(events_timer.read()) },
     );
 
+    const pricing_progress = std.Progress.Node.start(progress, "pricing", 0);
     var pricing_timer = try std.time.Timer.start();
     const before_pricing = pricing.count();
     try loadPricing(arena, allocator, pricing);
     const after_pricing = pricing.count();
+    std.Progress.Node.end(pricing_progress);
     std.log.info(
         "codex.loadPricing added {d} pricing models (total={d}) in {d:.2}ms",
         .{ after_pricing - before_pricing, after_pricing, nsToMs(pricing_timer.read()) },
@@ -95,6 +102,7 @@ fn collectEvents(
     allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
     events: *std.ArrayListUnmanaged(Model.TokenUsageEvent),
+    progress: std.Progress.Node,
 ) !void {
     const SessionJob = struct {
         path: []u8,
@@ -106,10 +114,13 @@ fn collectEvents(
         arena: std.mem.Allocator,
         events: *std.ArrayListUnmanaged(Model.TokenUsageEvent),
         events_mutex: *std.Thread.Mutex,
+        progress: std.Progress.Node,
     };
 
     const ProcessFn = struct {
         fn run(shared: *SharedContext, job: *SessionJob) void {
+            defer std.Progress.Node.completeOne(shared.progress);
+
             var local_events = std.ArrayListUnmanaged(Model.TokenUsageEvent){};
             defer local_events.deinit(shared.allocator);
 
@@ -177,6 +188,9 @@ fn collectEvents(
 
     const files_processed = jobs.items.len;
 
+    std.Progress.Node.setEstimatedTotalItems(progress, files_processed);
+    std.Progress.Node.setCompletedItems(progress, 0);
+
     if (files_processed == 0) {
         std.log.info(
             "codex.collectEvents: scanned 0 files, added 0 events in {d:.2}ms",
@@ -193,6 +207,7 @@ fn collectEvents(
         .arena = thread_safe_arena.allocator(),
         .events = events,
         .events_mutex = &events_mutex,
+        .progress = progress,
     };
 
     var threaded = std.Io.Threaded.init(allocator);
