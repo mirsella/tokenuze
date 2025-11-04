@@ -43,16 +43,7 @@ pub const Renderer = struct {
         pub fn jsonStringify(self: TotalsView, jw: anytype) !void {
             const totals = self.totals;
             try jw.beginObject();
-            try jw.objectField("input_tokens");
-            try jw.write(totals.usage.input_tokens);
-            try jw.objectField("cached_input_tokens");
-            try jw.write(totals.usage.cached_input_tokens);
-            try jw.objectField("output_tokens");
-            try jw.write(totals.usage.output_tokens);
-            try jw.objectField("reasoning_output_tokens");
-            try jw.write(totals.usage.reasoning_output_tokens);
-            try jw.objectField("total_tokens");
-            try jw.write(totals.usage.total_tokens);
+            try writeUsageFields(jw, totals.usage);
             try jw.objectField("cost_usd");
             try jw.write(totals.cost_usd);
             try jw.objectField("missing_pricing");
@@ -71,16 +62,7 @@ pub const Renderer = struct {
             try jw.write(summary.display_date);
             try jw.objectField("iso_date");
             try jw.write(summary.iso_date);
-            try jw.objectField("input_tokens");
-            try jw.write(summary.usage.input_tokens);
-            try jw.objectField("cached_input_tokens");
-            try jw.write(summary.usage.cached_input_tokens);
-            try jw.objectField("output_tokens");
-            try jw.write(summary.usage.output_tokens);
-            try jw.objectField("reasoning_output_tokens");
-            try jw.write(summary.usage.reasoning_output_tokens);
-            try jw.objectField("total_tokens");
-            try jw.write(summary.usage.total_tokens);
+            try writeUsageFields(jw, summary.usage);
             try jw.objectField("cost_usd");
             try jw.write(summary.cost_usd);
             try jw.objectField("models");
@@ -103,26 +85,10 @@ pub const Renderer = struct {
             try jw.beginObject();
             try jw.objectField("name");
             try jw.write(model.name);
-            try jw.objectField("display_name");
-            if (model.is_fallback) {
-                var buffer: [256]u8 = undefined;
-                const display = std.fmt.bufPrint(&buffer, "{s} (fallback)", .{model.name}) catch model.name;
-                try jw.write(display);
-            } else {
-                try jw.write(model.name);
-            }
+            try writeDisplayName(jw, model);
             try jw.objectField("is_fallback");
             try jw.write(model.is_fallback);
-            try jw.objectField("input_tokens");
-            try jw.write(model.usage.input_tokens);
-            try jw.objectField("cached_input_tokens");
-            try jw.write(model.usage.cached_input_tokens);
-            try jw.objectField("output_tokens");
-            try jw.write(model.usage.output_tokens);
-            try jw.objectField("reasoning_output_tokens");
-            try jw.write(model.usage.reasoning_output_tokens);
-            try jw.objectField("total_tokens");
-            try jw.write(model.usage.total_tokens);
+            try writeUsageFields(jw, model.usage);
             try jw.objectField("cost_usd");
             try jw.write(model.cost_usd);
             try jw.objectField("pricing_available");
@@ -130,4 +96,28 @@ pub const Renderer = struct {
             try jw.endObject();
         }
     };
+
+    fn writeUsageFields(jw: anytype, usage: Model.TokenUsage) !void {
+        try jw.objectField("input_tokens");
+        try jw.write(usage.input_tokens);
+        try jw.objectField("cached_input_tokens");
+        try jw.write(usage.cached_input_tokens);
+        try jw.objectField("output_tokens");
+        try jw.write(usage.output_tokens);
+        try jw.objectField("reasoning_output_tokens");
+        try jw.write(usage.reasoning_output_tokens);
+        try jw.objectField("total_tokens");
+        try jw.write(usage.total_tokens);
+    }
+
+    fn writeDisplayName(jw: anytype, model: *const Model.ModelSummary) !void {
+        try jw.objectField("display_name");
+        if (model.is_fallback) {
+            var buffer: [256]u8 = undefined;
+            const display = std.fmt.bufPrint(&buffer, "{s} (fallback)", .{model.name}) catch model.name;
+            try jw.write(display);
+        } else {
+            try jw.write(model.name);
+        }
+    }
 };
