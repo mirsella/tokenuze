@@ -51,7 +51,13 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
         {
             const write_progress = std.Progress.Node.start(progress_root, "write output", 0);
             defer std.Progress.Node.end(write_progress);
-            try out_writer.writeAll("{\"days\":[],\"total\":{\"input_tokens\":0,\"cached_input_tokens\":0,\"output_tokens\":0,\"reasoning_output_tokens\":0,\"total_tokens\":0,\"cost_usd\":0.0,\"missing_pricing\":[]}}\n");
+            if (filters.pretty_output) {
+                try out_writer.writeAll(
+                    "{\n  \"days\": [],\n  \"total\": {\n    \"input_tokens\": 0,\n    \"cached_input_tokens\": 0,\n    \"output_tokens\": 0,\n    \"reasoning_output_tokens\": 0,\n    \"total_tokens\": 0,\n    \"cost_usd\": 0.0,\n    \"missing_pricing\": []\n  }\n}\n",
+                );
+            } else {
+                try out_writer.writeAll("{\"days\":[],\"total\":{\"input_tokens\":0,\"cached_input_tokens\":0,\"output_tokens\":0,\"reasoning_output_tokens\":0,\"total_tokens\":0,\"cost_usd\":0.0,\"missing_pricing\":[]}}\n");
+            }
         }
         try out_writer.flush();
         std.Progress.setStatus(.success);
@@ -138,7 +144,7 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
     {
         const write_progress = std.Progress.Node.start(progress_root, "write output", 0);
         defer std.Progress.Node.end(write_progress);
-        try render.Renderer.writeSummary(&out_writer, summaries.items, &totals);
+        try render.Renderer.writeSummary(&out_writer, summaries.items, &totals, filters.pretty_output);
     }
     std.log.info(
         "phase.write_json completed in {d:.2}ms (days={d})",

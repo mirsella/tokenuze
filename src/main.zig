@@ -46,6 +46,11 @@ fn parseFilters(allocator: std.mem.Allocator) CliError!tokenuze.DateFilters {
             continue;
         }
 
+        if (std.mem.eql(u8, arg, "--pretty")) {
+            filters.pretty_output = true;
+            continue;
+        }
+
         if (std.mem.startsWith(u8, arg, "-")) {
             return cliError("unknown option: {s}", .{arg});
         }

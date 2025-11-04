@@ -6,6 +6,7 @@ pub const PRICING_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/
 pub const DateFilters = struct {
     since: ?[10]u8 = null,
     until: ?[10]u8 = null,
+    pretty_output: bool = false,
 };
 
 pub const ParseDateError = error{

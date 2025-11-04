@@ -2,12 +2,20 @@ const std = @import("std");
 const Model = @import("model.zig");
 
 pub const Renderer = struct {
-    pub fn writeSummary(writer: anytype, summaries: []const Model.DailySummary, totals: *const Model.SummaryTotals) !void {
+    pub fn writeSummary(
+        writer: anytype,
+        summaries: []const Model.DailySummary,
+        totals: *const Model.SummaryTotals,
+        pretty: bool,
+    ) !void {
         const payload = Output{
             .days = SummaryArray{ .items = summaries },
             .total = TotalsView{ .totals = totals },
         };
-        var stringify = std.json.Stringify{ .writer = writer, .options = .{ .whitespace = .indent_2 } };
+        var stringify = std.json.Stringify{
+            .writer = writer,
+            .options = if (pretty) .{ .whitespace = .indent_2 } else .{},
+        };
         try stringify.write(payload);
         try writer.writeAll("\n");
     }
