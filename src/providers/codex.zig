@@ -258,7 +258,9 @@ fn parseSessionFile(
         if (start_token != .object_begin) continue;
 
         var payload_result = PayloadResult{};
+        defer payload_result.deinit(allocator);
         var timestamp_token: ?Model.TokenBuffer = null;
+        defer if (timestamp_token) |*tok| tok.release(allocator);
         var is_turn_context = false;
         var is_event_msg = false;
         var parse_failed = false;
@@ -307,18 +309,11 @@ fn parseSessionFile(
             }
         }
 
-        if (parse_failed) {
-            if (timestamp_token) |*tok| tok.release(allocator);
-            payload_result.deinit(allocator);
-            continue;
-        }
+        if (parse_failed) continue;
 
         _ = scanner.next() catch {};
 
-        if (timestamp_token == null) {
-            payload_result.deinit(allocator);
-            continue;
-        }
+        if (timestamp_token == null) continue;
 
         if (is_turn_context) {
             if (payload_result.model) |token| {
@@ -333,37 +328,25 @@ fn parseSessionFile(
                 }
                 model_token.release(allocator);
             }
-            if (timestamp_token) |*tok| tok.release(allocator);
-            payload_result.deinit(allocator);
             continue;
         }
 
-        if (!is_event_msg) {
-            if (timestamp_token) |*tok| tok.release(allocator);
-            payload_result.deinit(allocator);
-            continue;
-        }
+        if (!is_event_msg) continue;
 
         var payload_type_is_token_count = false;
         if (payload_result.payload_type) |token| {
             payload_type_is_token_count = std.mem.eql(u8, token.slice, "token_count");
         }
-        if (!payload_type_is_token_count) {
-            if (timestamp_token) |*tok| tok.release(allocator);
-            payload_result.deinit(allocator);
-            continue;
-        }
+        if (!payload_type_is_token_count) continue;
 
         var raw_timestamp = timestamp_token.?;
         timestamp_token = null;
         const timestamp_copy = try duplicateNonEmpty(arena, raw_timestamp.slice) orelse {
             raw_timestamp.release(allocator);
-            payload_result.deinit(allocator);
             continue;
         };
         raw_timestamp.release(allocator);
         const iso_date = timeutil.localIsoDateFromTimestamp(timestamp_copy) catch {
-            payload_result.deinit(allocator);
             continue;
         };
 
@@ -377,14 +360,10 @@ fn parseSessionFile(
             previous_totals = total_usage;
         }
 
-        if (delta_usage == null) {
-            payload_result.deinit(allocator);
-            continue;
-        }
+        if (delta_usage == null) continue;
 
         const delta = delta_usage.?;
         if (delta.input_tokens == 0 and delta.cached_input_tokens == 0 and delta.output_tokens == 0 and delta.reasoning_output_tokens == 0) {
-            payload_result.deinit(allocator);
             continue;
         }
 
@@ -417,7 +396,6 @@ fn parseSessionFile(
         }
 
         if (model_name == null) {
-            payload_result.deinit(allocator);
             continue;
         }
         if (std.mem.eql(u8, model_name.?, LEGACY_FALLBACK_MODEL) and extracted_model == null) {
@@ -434,8 +412,6 @@ fn parseSessionFile(
             .is_fallback = is_fallback,
         };
         try events.append(allocator, event);
-
-        payload_result.deinit(allocator);
     }
 }
 
