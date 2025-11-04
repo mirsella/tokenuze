@@ -521,23 +521,7 @@ fn parsePayload(
 
     _ = try scanner.next(); // consume object_begin
 
-    while (true) {
-        const key_token = try scanner.nextAlloc(allocator, .alloc_if_needed);
-        switch (key_token) {
-            .object_end => break,
-            .string => |slice| {
-                var key = TokenString{ .slice = slice };
-                defer key.release(allocator);
-                try parsePayloadField(allocator, scanner, key.slice, payload_result);
-            },
-            .allocated_string => |buf| {
-                var key = TokenString{ .slice = buf, .owned = buf };
-                defer key.release(allocator);
-                try parsePayloadField(allocator, scanner, key.slice, payload_result);
-            },
-            else => return ParseError.UnexpectedToken,
-        }
-    }
+    try walkObject(allocator, scanner, payload_result, handlePayloadField);
 }
 
 fn parsePayloadField(
@@ -589,23 +573,7 @@ fn parseInfoObject(
 
     _ = try scanner.next(); // consume object_begin
 
-    while (true) {
-        const key_token = try scanner.nextAlloc(allocator, .alloc_if_needed);
-        switch (key_token) {
-            .object_end => break,
-            .string => |slice| {
-                var key = TokenString{ .slice = slice };
-                defer key.release(allocator);
-                try parseInfoField(allocator, scanner, key.slice, payload_result);
-            },
-            .allocated_string => |buf| {
-                var key = TokenString{ .slice = buf, .owned = buf };
-                defer key.release(allocator);
-                try parseInfoField(allocator, scanner, key.slice, payload_result);
-            },
-            else => return ParseError.UnexpectedToken,
-        }
-    }
+    try walkObject(allocator, scanner, payload_result, handleInfoField);
 }
 
 fn parseInfoField(
@@ -746,6 +714,49 @@ fn parseModelValue(
             _ = try scanner.next();
         },
         else => try scanner.skipValue(),
+    }
+}
+
+fn handlePayloadField(
+    payload_result: *PayloadResult,
+    allocator: std.mem.Allocator,
+    scanner: *std.json.Scanner,
+    key: []const u8,
+) ParserError!void {
+    try parsePayloadField(allocator, scanner, key, payload_result);
+}
+
+fn handleInfoField(
+    payload_result: *PayloadResult,
+    allocator: std.mem.Allocator,
+    scanner: *std.json.Scanner,
+    key: []const u8,
+) ParserError!void {
+    try parseInfoField(allocator, scanner, key, payload_result);
+}
+
+fn walkObject(
+    allocator: std.mem.Allocator,
+    scanner: *std.json.Scanner,
+    context: anytype,
+    comptime handler: fn (@TypeOf(context), std.mem.Allocator, *std.json.Scanner, []const u8) ParserError!void,
+) ParserError!void {
+    while (true) {
+        const key_token = try scanner.nextAlloc(allocator, .alloc_if_needed);
+        switch (key_token) {
+            .object_end => break,
+            .string => |slice| {
+                var key = TokenString{ .slice = slice };
+                defer key.release(allocator);
+                try handler(context, allocator, scanner, key.slice);
+            },
+            .allocated_string => |buf| {
+                var key = TokenString{ .slice = buf, .owned = buf };
+                defer key.release(allocator);
+                try handler(context, allocator, scanner, key.slice);
+            },
+            else => return ParseError.UnexpectedToken,
+        }
     }
 }
 
