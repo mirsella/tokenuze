@@ -8,6 +8,7 @@ const CliError = error{
 const CliOptions = struct {
     filters: tokenuze.DateFilters = .{},
     machine_id: bool = false,
+    providers: tokenuze.ProviderSelection = tokenuze.ProviderSelection.initAll(),
 };
 
 pub fn main() !void {
@@ -22,7 +23,7 @@ pub fn main() !void {
         try printMachineId(allocator);
         return;
     }
-    try tokenuze.run(allocator, options.filters);
+    try tokenuze.run(allocator, options.filters, options.providers);
 }
 
 fn parseOptions(allocator: std.mem.Allocator) CliError!CliOptions {
@@ -32,6 +33,7 @@ fn parseOptions(allocator: std.mem.Allocator) CliError!CliOptions {
     _ = args.next(); // program name
 
     var options = CliOptions{};
+    var models_specified = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--since")) {
             const value = args.next() orelse return cliError("missing value for --since", .{});
@@ -66,6 +68,20 @@ fn parseOptions(allocator: std.mem.Allocator) CliError!CliOptions {
             continue;
         }
 
+        if (std.mem.eql(u8, arg, "--model")) {
+            const value = args.next() orelse return cliError("missing value for --model", .{});
+            if (!models_specified) {
+                models_specified = true;
+                options.providers = tokenuze.ProviderSelection.initEmpty();
+            }
+            if (tokenuze.findProviderIndex(value)) |index| {
+                options.providers.includeIndex(index);
+            } else {
+                return cliError("unknown model '{s}' (expected one of: {s})", .{ value, providerListDescription() });
+            }
+            continue;
+        }
+
         if (std.mem.startsWith(u8, arg, "-")) {
             return cliError("unknown option: {s}", .{arg});
         }
@@ -74,7 +90,7 @@ fn parseOptions(allocator: std.mem.Allocator) CliError!CliOptions {
     }
 
     if (options.machine_id) {
-        if (options.filters.since != null or options.filters.until != null or options.filters.pretty_output) {
+        if (options.filters.since != null or options.filters.until != null or options.filters.pretty_output or models_specified) {
             return cliError("--machine-id cannot be combined with other flags", .{});
         }
     }
@@ -105,4 +121,8 @@ fn printMachineId(allocator: std.mem.Allocator) !void {
 fn cliError(comptime fmt: []const u8, args: anytype) CliError {
     std.debug.print("error: " ++ fmt ++ "\n", args);
     return CliError.InvalidUsage;
+}
+
+fn providerListDescription() []const u8 {
+    return tokenuze.provider_list_description;
 }

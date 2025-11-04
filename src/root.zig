@@ -1,6 +1,7 @@
 const std = @import("std");
 const Model = @import("model.zig");
 const codex = @import("providers/codex.zig");
+const gemini = @import("providers/gemini.zig");
 const render = @import("render.zig");
 pub const machine_id = @import("machine_id.zig");
 
@@ -15,7 +16,98 @@ pub const DailySummary = Model.DailySummary;
 pub const SummaryTotals = Model.SummaryTotals;
 pub const parseFilterDate = Model.parseFilterDate;
 
-pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
+const CollectFn = *const fn (
+    std.mem.Allocator,
+    std.mem.Allocator,
+    *Model.SummaryBuilder,
+    Model.DateFilters,
+    *Model.PricingMap,
+    ?std.Progress.Node,
+) anyerror!void;
+
+pub const ProviderSpec = struct {
+    name: []const u8,
+    phase_label: []const u8,
+    collect: CollectFn,
+};
+
+pub const providers = [_]ProviderSpec{
+    .{ .name = "codex", .phase_label = "collect_codex", .collect = codex.collect },
+    .{ .name = "gemini", .phase_label = "collect_gemini", .collect = gemini.collect },
+};
+
+const provider_name_list = initProviderNames();
+pub const provider_list_description = initProviderListDescription();
+
+fn initProviderNames() [providers.len][]const u8 {
+    var names: [providers.len][]const u8 = undefined;
+    inline for (providers, 0..) |provider, idx| {
+        names[idx] = provider.name;
+    }
+    return names;
+}
+
+pub fn providerNames() []const []const u8 {
+    return provider_name_list[0..];
+}
+
+fn initProviderListDescription() []const u8 {
+    comptime var combined: []const u8 = "";
+    inline for (providers, 0..) |provider, idx| {
+        if (idx == 0) {
+            combined = provider.name;
+        } else {
+            combined = std.fmt.comptimePrint("{s}, {s}", .{ combined, provider.name });
+        }
+    }
+    return combined;
+}
+
+const provider_count = providers.len;
+comptime {
+    if (provider_count == 0) @compileError("tokenuze requires at least one provider");
+    if (provider_count > 64) @compileError("ProviderSelection mask currently supports up to 64 providers");
+}
+
+const provider_full_mask: u64 = if (provider_count == 64)
+    std.math.maxInt(u64)
+else if (provider_count == 0)
+    0
+else
+    (@as(u64, 1) << @intCast(provider_count)) - 1;
+
+pub const ProviderSelection = struct {
+    mask: u64 = provider_full_mask,
+
+    pub fn initAll() ProviderSelection {
+        return .{ .mask = provider_full_mask };
+    }
+
+    pub fn initEmpty() ProviderSelection {
+        return .{ .mask = 0 };
+    }
+
+    pub fn includeIndex(self: *ProviderSelection, index: usize) void {
+        self.mask |= @as(u64, 1) << @intCast(index);
+    }
+
+    pub fn includesIndex(self: ProviderSelection, index: usize) bool {
+        return (self.mask & (@as(u64, 1) << @intCast(index))) != 0;
+    }
+
+    pub fn isEmpty(self: ProviderSelection) bool {
+        return self.mask == 0;
+    }
+};
+
+pub fn findProviderIndex(name: []const u8) ?usize {
+    for (providers, 0..) |provider, idx| {
+        if (std.mem.eql(u8, provider.name, name)) return idx;
+    }
+    return null;
+}
+
+pub fn run(allocator: std.mem.Allocator, filters: DateFilters, selection: ProviderSelection) !void {
     const disable_progress = !std.fs.File.stdout().isTty();
     var progress_root: std.Progress.Node = undefined;
     if (!disable_progress) {
@@ -37,13 +129,26 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
     var summary_builder = Model.SummaryBuilder.init(allocator);
     defer summary_builder.deinit(allocator);
 
-    var collect_phase = try PhaseTracker.start(progress_parent, "collect codex", 0);
-    defer collect_phase.finish();
-    try codex.collect(allocator, arena, &summary_builder, filters, &pricing_map, collect_phase.progress());
-    std.log.info(
-        "phase.collect completed in {d:.2}ms (events={d}, pricing_models={d})",
-        .{ collect_phase.elapsedMs(), summary_builder.eventCount(), pricing_map.count() },
-    );
+    for (providers, 0..) |provider, idx| {
+        if (!selection.includesIndex(idx)) continue;
+        const before_events = summary_builder.eventCount();
+        const before_pricing = pricing_map.count();
+        var collect_phase = try PhaseTracker.start(progress_parent, provider.phase_label, 0);
+        try provider.collect(allocator, arena, &summary_builder, filters, &pricing_map, collect_phase.progress());
+        const elapsed = collect_phase.elapsedMs();
+        collect_phase.finish();
+        std.log.info(
+            "phase.{s} completed in {d:.2}ms (events += {d}, total_events={d}, pricing_models={d}, pricing_added={d})",
+            .{
+                provider.phase_label,
+                elapsed,
+                summary_builder.eventCount() - before_events,
+                summary_builder.eventCount(),
+                pricing_map.count(),
+                pricing_map.count() - before_pricing,
+            },
+        );
+    }
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
