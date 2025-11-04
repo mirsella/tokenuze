@@ -42,7 +42,9 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
         .{ nsToMs(collect_timer.read()), events.items.len, pricing_map.count() },
     );
 
-    var out_writer = OutputWriter{ .file = std.fs.File.stdout() };
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_stream = std.fs.File.stdout().writer(&stdout_buffer);
+    var out_writer = stdout_stream.interface;
 
     if (events.items.len == 0) {
         std.log.info("no events to process; total runtime {d:.2}ms", .{nsToMs(total_timer.read())});
@@ -51,6 +53,7 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
             defer std.Progress.Node.end(write_progress);
             try out_writer.writeAll("{\"days\":[],\"total\":{\"input_tokens\":0,\"cached_input_tokens\":0,\"output_tokens\":0,\"reasoning_output_tokens\":0,\"total_tokens\":0,\"cost_usd\":0.0,\"missing_pricing\":[]}}\n");
         }
+        try out_writer.flush();
         std.Progress.setStatus(.success);
         return;
     }
@@ -142,6 +145,7 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
         .{ nsToMs(output_timer.read()), summaries.items.len },
     );
 
+    try out_writer.flush();
     std.log.info("phase.total runtime {d:.2}ms", .{nsToMs(total_timer.read())});
     std.Progress.setStatus(.success);
 }
@@ -149,14 +153,6 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
 fn nsToMs(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
 }
-
-const OutputWriter = struct {
-    file: std.fs.File,
-
-    pub fn writeAll(self: *OutputWriter, bytes: []const u8) !void {
-        try self.file.writeAll(bytes);
-    }
-};
 
 fn eventLessThan(_: void, lhs: Model.TokenUsageEvent, rhs: Model.TokenUsageEvent) bool {
     if (std.mem.eql(u8, lhs.timestamp, rhs.timestamp)) {

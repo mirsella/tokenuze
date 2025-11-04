@@ -698,38 +698,12 @@ fn parseUsageField(
     key: []const u8,
     accumulator: *Model.UsageAccumulator,
 ) ParserError!void {
-    if (std.mem.eql(u8, key, "input_tokens")) {
-        const value = try parseU64Value(scanner, allocator);
-        accumulator.applyField(key, value);
+    const field = Model.usageFieldForKey(key) orelse {
+        try scanner.skipValue();
         return;
-    }
-    if (std.mem.eql(u8, key, "cached_input_tokens")) {
-        const value = try parseU64Value(scanner, allocator);
-        accumulator.applyField(key, value);
-        return;
-    }
-    if (std.mem.eql(u8, key, "cache_read_input_tokens")) {
-        const value = try parseU64Value(scanner, allocator);
-        accumulator.applyField(key, value);
-        return;
-    }
-    if (std.mem.eql(u8, key, "output_tokens")) {
-        const value = try parseU64Value(scanner, allocator);
-        accumulator.applyField(key, value);
-        return;
-    }
-    if (std.mem.eql(u8, key, "reasoning_output_tokens")) {
-        const value = try parseU64Value(scanner, allocator);
-        accumulator.applyField(key, value);
-        return;
-    }
-    if (std.mem.eql(u8, key, "total_tokens")) {
-        const value = try parseU64Value(scanner, allocator);
-        accumulator.applyField(key, value);
-        return;
-    }
-
-    try scanner.skipValue();
+    };
+    const value = try parseU64Value(scanner, allocator);
+    accumulator.applyField(field, value);
 }
 
 fn parseModelValue(

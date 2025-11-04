@@ -104,30 +104,14 @@ pub const UsageAccumulator = struct {
     cached_direct: ?u64 = null,
     cached_fallback: ?u64 = null,
 
-    pub fn applyField(self: *UsageAccumulator, key: []const u8, value: u64) void {
-        if (std.mem.eql(u8, key, "input_tokens")) {
-            self.raw.input_tokens = value;
-            return;
-        }
-        if (std.mem.eql(u8, key, "cached_input_tokens")) {
-            self.cached_direct = value;
-            return;
-        }
-        if (std.mem.eql(u8, key, "cache_read_input_tokens")) {
-            self.cached_fallback = value;
-            return;
-        }
-        if (std.mem.eql(u8, key, "output_tokens")) {
-            self.raw.output_tokens = value;
-            return;
-        }
-        if (std.mem.eql(u8, key, "reasoning_output_tokens")) {
-            self.raw.reasoning_output_tokens = value;
-            return;
-        }
-        if (std.mem.eql(u8, key, "total_tokens")) {
-            self.raw.total_tokens = value;
-            return;
+    pub fn applyField(self: *UsageAccumulator, field: UsageField, value: u64) void {
+        switch (field) {
+            .input_tokens => self.raw.input_tokens = value,
+            .cached_input_tokens => self.cached_direct = value,
+            .cache_read_input_tokens => self.cached_fallback = value,
+            .output_tokens => self.raw.output_tokens = value,
+            .reasoning_output_tokens => self.raw.reasoning_output_tokens = value,
+            .total_tokens => self.raw.total_tokens = value,
         }
     }
 
@@ -144,6 +128,28 @@ pub const UsageAccumulator = struct {
         return self.raw;
     }
 };
+
+pub const UsageField = enum {
+    input_tokens,
+    cached_input_tokens,
+    cache_read_input_tokens,
+    output_tokens,
+    reasoning_output_tokens,
+    total_tokens,
+};
+
+const usage_field_map = std.StaticStringMap(UsageField).initComptime(.{
+    .{ "input_tokens", .input_tokens },
+    .{ "cached_input_tokens", .cached_input_tokens },
+    .{ "cache_read_input_tokens", .cache_read_input_tokens },
+    .{ "output_tokens", .output_tokens },
+    .{ "reasoning_output_tokens", .reasoning_output_tokens },
+    .{ "total_tokens", .total_tokens },
+});
+
+pub fn usageFieldForKey(key: []const u8) ?UsageField {
+    return usage_field_map.get(key);
+}
 
 pub fn parseTokenNumber(slice: []const u8) u64 {
     if (slice.len == 0) return 0;
