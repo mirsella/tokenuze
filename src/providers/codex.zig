@@ -44,7 +44,8 @@ const ParserError = ParseError || ScannerAllocError || ScannerSkipError || Scann
 pub fn collect(
     allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
-    events: *std.ArrayListUnmanaged(Model.TokenUsageEvent),
+    summaries: *Model.SummaryBuilder,
+    filters: Model.DateFilters,
     pricing: *Model.PricingMap,
     progress: ?std.Progress.Node,
 ) !void {
@@ -57,9 +58,9 @@ pub fn collect(
         events_progress = std.Progress.Node.start(node, "scan sessions", 0);
     }
     var events_timer = try std.time.Timer.start();
-    const before_events = events.items.len;
-    try collectEvents(allocator, arena, events, events_progress);
-    const after_events = events.items.len;
+    const before_events = summaries.eventCount();
+    try collectEvents(allocator, arena, summaries, filters, events_progress);
+    const after_events = summaries.eventCount();
     if (events_progress) |node| std.Progress.Node.end(node);
     std.log.info(
         "codex.collectEvents produced {d} new events in {d:.2}ms",
@@ -89,7 +90,8 @@ pub fn collect(
 fn collectEvents(
     allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
-    events: *std.ArrayListUnmanaged(Model.TokenUsageEvent),
+    summaries: *Model.SummaryBuilder,
+    filters: Model.DateFilters,
     progress: ?std.Progress.Node,
 ) !void {
     const SessionJob = struct {
@@ -100,8 +102,9 @@ fn collectEvents(
     const SharedContext = struct {
         allocator: std.mem.Allocator,
         arena: std.mem.Allocator,
-        events: *std.ArrayListUnmanaged(Model.TokenUsageEvent),
-        events_mutex: *std.Thread.Mutex,
+        summaries: *Model.SummaryBuilder,
+        builder_mutex: *std.Thread.Mutex,
+        filters: Model.DateFilters,
         progress: ?std.Progress.Node,
     };
 
@@ -127,13 +130,13 @@ fn collectEvents(
 
             if (local_events.items.len == 0) return;
 
-            shared.events_mutex.lock();
-            defer shared.events_mutex.unlock();
-
-            shared.events.ensureTotalCapacity(shared.allocator, shared.events.items.len + local_events.items.len) catch {
-                return;
-            };
-            shared.events.appendSliceAssumeCapacity(local_events.items);
+            shared.builder_mutex.lock();
+            defer shared.builder_mutex.unlock();
+            for (local_events.items) |*event| {
+                shared.summaries.ingest(shared.allocator, shared.arena, event, shared.filters) catch {
+                    return;
+                };
+            }
 
             job.events_added = local_events.items.len;
         }
@@ -189,14 +192,15 @@ fn collectEvents(
         return;
     }
 
-    var events_mutex = std.Thread.Mutex{};
+    var builder_mutex = std.Thread.Mutex{};
 
     var thread_safe_arena = std.heap.ThreadSafeAllocator{ .child_allocator = arena };
     var shared = SharedContext{
         .allocator = allocator,
         .arena = thread_safe_arena.allocator(),
-        .events = events,
-        .events_mutex = &events_mutex,
+        .summaries = summaries,
+        .builder_mutex = &builder_mutex,
+        .filters = filters,
         .progress = progress,
     };
 

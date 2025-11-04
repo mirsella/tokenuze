@@ -235,31 +235,64 @@ pub const SummaryTotals = struct {
     }
 };
 
-pub fn buildDailySummaries(
-    allocator: std.mem.Allocator,
-    arena: std.mem.Allocator,
-    events: []const TokenUsageEvent,
-    summaries: *std.ArrayListUnmanaged(DailySummary),
-    date_index: *std.StringHashMap(usize),
-    filters: DateFilters,
-) !void {
-    for (events) |event| {
-        const iso_slice = event.local_iso_date[0..];
-        if (!withinFilters(filters, iso_slice)) continue;
+pub const SummaryBuilder = struct {
+    summaries: std.ArrayListUnmanaged(DailySummary) = .{},
+    date_index: std.StringHashMap(usize),
+    event_count: usize = 0,
 
-        if (date_index.get(iso_slice)) |idx| {
-            try updateSummary(&summaries.items[idx], allocator, arena, &event);
-            continue;
+    pub fn init(allocator: std.mem.Allocator) SummaryBuilder {
+        return .{
+            .summaries = .{},
+            .date_index = std.StringHashMap(usize).init(allocator),
+            .event_count = 0,
+        };
+    }
+
+    pub fn deinit(self: *SummaryBuilder, allocator: std.mem.Allocator) void {
+        for (self.summaries.items) |*summary| {
+            summary.deinit(allocator);
+        }
+        self.summaries.deinit(allocator);
+        self.date_index.deinit();
+    }
+
+    pub fn ingest(
+        self: *SummaryBuilder,
+        allocator: std.mem.Allocator,
+        arena: std.mem.Allocator,
+        event: *const TokenUsageEvent,
+        filters: DateFilters,
+    ) !void {
+        const iso_slice = event.local_iso_date[0..];
+        if (!withinFilters(filters, iso_slice)) return;
+
+        self.event_count += 1;
+
+        if (self.date_index.get(iso_slice)) |idx| {
+            try updateSummary(&self.summaries.items[idx], allocator, arena, event);
+            return;
         }
 
         const iso_copy = try arena.dupe(u8, iso_slice);
         const display = try formatDisplayDate(arena, iso_copy);
-        try summaries.append(allocator, DailySummary.init(allocator, iso_copy, display));
-        const summary_idx = summaries.items.len - 1;
-        try date_index.put(iso_copy, summary_idx);
-        try updateSummary(&summaries.items[summary_idx], allocator, arena, &event);
+        try self.summaries.append(allocator, DailySummary.init(allocator, iso_copy, display));
+        const summary_idx = self.summaries.items.len - 1;
+        try self.date_index.put(self.summaries.items[summary_idx].iso_date, summary_idx);
+        try updateSummary(&self.summaries.items[summary_idx], allocator, arena, event);
     }
-}
+
+    pub fn items(self: *SummaryBuilder) []DailySummary {
+        return self.summaries.items;
+    }
+
+    pub fn len(self: SummaryBuilder) usize {
+        return self.summaries.items.len;
+    }
+
+    pub fn eventCount(self: SummaryBuilder) usize {
+        return self.event_count;
+    }
+};
 
 pub fn applyPricing(
     allocator: std.mem.Allocator,
@@ -286,10 +319,10 @@ pub fn applyPricing(
 
 pub fn accumulateTotals(
     allocator: std.mem.Allocator,
-    summaries: *std.ArrayListUnmanaged(DailySummary),
+    summaries: []const DailySummary,
     totals: *SummaryTotals,
 ) void {
-    for (summaries.items) |summary| {
+    for (summaries) |summary| {
         totals.usage.add(summary.usage);
         totals.cost_usd += summary.cost_usd;
         for (summary.missing_pricing.items) |name| {

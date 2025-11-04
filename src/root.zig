@@ -30,84 +30,63 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var events = std.ArrayListUnmanaged(Model.TokenUsageEvent){};
-    defer events.deinit(allocator);
-
     var pricing_map = Model.PricingMap.init(allocator);
     defer pricing_map.deinit();
 
+    var summary_builder = Model.SummaryBuilder.init(allocator);
+    defer summary_builder.deinit(allocator);
+
     var collect_phase = try PhaseTracker.start(progress_parent, "collect codex", 0);
     defer collect_phase.finish();
-    try codex.collect(allocator, arena, &events, &pricing_map, collect_phase.progress());
+    try codex.collect(allocator, arena, &summary_builder, filters, &pricing_map, collect_phase.progress());
     std.log.info(
         "phase.collect completed in {d:.2}ms (events={d}, pricing_models={d})",
-        .{ collect_phase.elapsedMs(), events.items.len, pricing_map.count() },
+        .{ collect_phase.elapsedMs(), summary_builder.eventCount(), pricing_map.count() },
     );
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const out_writer = &stdout_writer.interface;
 
-    if (events.items.len == 0) {
+    var summaries = summary_builder.items();
+    if (summaries.len == 0) {
         std.log.info("no events to process; total runtime {d:.2}ms", .{nsToMs(total_timer.read())});
         var totals = SummaryTotals.init();
         defer totals.deinit(allocator);
-        const empty_days = [_]DailySummary{};
-        try render.Renderer.writeSummary(out_writer, empty_days[0..], &totals, filters.pretty_output);
+        try render.Renderer.writeSummary(out_writer, summaries, &totals, filters.pretty_output);
         try flushOutput(out_writer);
         if (!disable_progress) std.Progress.setStatus(.success);
         return;
     }
 
-    // ... rest of file ...
-
-    var summaries = std.ArrayListUnmanaged(DailySummary){};
-    defer {
-        for (summaries.items) |*summary| {
-            summary.deinit(allocator);
-        }
-        summaries.deinit(allocator);
-    }
-
-    var date_index = std.StringHashMap(usize).init(allocator);
-    defer date_index.deinit();
-
-    var build_phase = try PhaseTracker.start(progress_parent, "build summaries", 0);
-    defer build_phase.finish();
-    try Model.buildDailySummaries(allocator, arena, events.items, &summaries, &date_index, filters);
-    std.log.info(
-        "phase.build_summaries completed in {d:.2}ms (days={d})",
-        .{ build_phase.elapsedMs(), summaries.items.len },
-    );
-
     var missing_set = std.StringHashMap(u8).init(allocator);
     defer missing_set.deinit();
 
-    var pricing_phase = try PhaseTracker.start(progress_parent, "apply pricing", summaries.items.len);
+    var pricing_phase = try PhaseTracker.start(progress_parent, "apply pricing", summaries.len);
     defer pricing_phase.finish();
-    for (summaries.items) |*summary| {
+    for (summaries) |*summary| {
         Model.applyPricing(allocator, summary, &pricing_map, &missing_set);
         std.sort.pdq(ModelSummary, summary.models.items, {}, modelLessThan);
         if (pricing_phase.progress()) |node| std.Progress.Node.completeOne(node);
     }
     std.log.info(
         "phase.apply_pricing completed in {d:.2}ms (days={d})",
-        .{ pricing_phase.elapsedMs(), summaries.items.len },
+        .{ pricing_phase.elapsedMs(), summaries.len },
     );
 
     var sort_days_phase = try PhaseTracker.start(progress_parent, "sort days", 0);
     defer sort_days_phase.finish();
-    std.sort.pdq(DailySummary, summaries.items, {}, summaryLessThan);
+    std.sort.pdq(DailySummary, summaries, {}, summaryLessThan);
     std.log.info(
         "phase.sort_days completed in {d:.2}ms (days={d})",
-        .{ sort_days_phase.elapsedMs(), summaries.items.len },
+        .{ sort_days_phase.elapsedMs(), summaries.len },
     );
 
     var totals = SummaryTotals.init();
     defer totals.deinit(allocator);
     var totals_phase = try PhaseTracker.start(progress_parent, "totals", 0);
     defer totals_phase.finish();
-    Model.accumulateTotals(allocator, &summaries, &totals);
+    Model.accumulateTotals(allocator, summaries, &totals);
     try Model.collectMissingModels(allocator, &missing_set, &totals.missing_pricing);
     std.log.info(
         "phase.totals completed in {d:.2}ms (missing_pricing={d})",
@@ -116,10 +95,10 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters) !void {
 
     var output_phase = try PhaseTracker.start(progress_parent, "write output", 0);
     defer output_phase.finish();
-    try render.Renderer.writeSummary(out_writer, summaries.items, &totals, filters.pretty_output);
+    try render.Renderer.writeSummary(out_writer, summaries, &totals, filters.pretty_output);
     std.log.info(
         "phase.write_json completed in {d:.2}ms (days={d})",
-        .{ output_phase.elapsedMs(), summaries.items.len },
+        .{ output_phase.elapsedMs(), summaries.len },
     );
 
     try flushOutput(out_writer);
