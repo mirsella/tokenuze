@@ -27,7 +27,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.link_libc = true;
-    exe.linkage = .static;
+    if (target.result.os.tag == .linux and target.result.abi == .musl) {
+        exe.linkage = .static;
+    }
 
     b.installArtifact(exe);
 
