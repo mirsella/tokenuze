@@ -195,24 +195,22 @@ pub const DailySummary = struct {
     usage: TokenUsage,
     cost_usd: f64,
     models: std.ArrayListUnmanaged(ModelSummary),
-    model_index: std.StringHashMap(usize),
     missing_pricing: std.ArrayListUnmanaged([]const u8),
 
     pub fn init(allocator: std.mem.Allocator, iso_date: []const u8, display_date: []const u8) DailySummary {
+        _ = allocator;
         return .{
             .iso_date = iso_date,
             .display_date = display_date,
             .usage = .{},
             .cost_usd = 0,
             .models = .{},
-            .model_index = std.StringHashMap(usize).init(allocator),
             .missing_pricing = .{},
         };
     }
 
     pub fn deinit(self: *DailySummary, allocator: std.mem.Allocator) void {
         self.models.deinit(allocator);
-        self.model_index.deinit();
         self.missing_pricing.deinit(allocator);
     }
 };
@@ -360,10 +358,10 @@ fn updateSummary(
 ) !void {
     summary.usage.add(event.usage);
 
-    if (summary.model_index.get(event.model)) |idx| {
-        var model_summary = &summary.models.items[idx];
-        model_summary.usage.add(event.usage);
-        if (event.is_fallback) model_summary.is_fallback = true;
+    if (findModelIndex(summary, event.model)) |idx| {
+        var existing = &summary.models.items[idx];
+        existing.usage.add(event.usage);
+        if (event.is_fallback) existing.is_fallback = true;
         return;
     }
 
@@ -375,8 +373,13 @@ fn updateSummary(
         .cost_usd = 0,
         .usage = event.usage,
     });
-    const new_index = summary.models.items.len - 1;
-    try summary.model_index.put(summary.models.items[new_index].name, new_index);
+}
+
+fn findModelIndex(summary: *DailySummary, name: []const u8) ?usize {
+    for (summary.models.items, 0..) |model, idx| {
+        if (std.mem.eql(u8, model.name, name)) return idx;
+    }
+    return null;
 }
 
 fn rawUsageDelta(current: RawTokenUsage, previous_opt: ?RawTokenUsage) RawTokenUsage {
