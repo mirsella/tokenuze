@@ -244,13 +244,15 @@ fn parseSessionFile(
     };
     defer allocator.free(file_bytes);
 
+    var scanner = std.json.Scanner.initStreaming(allocator);
+    defer scanner.deinit();
+
     var lines = std.mem.splitScalar(u8, file_bytes, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len == 0) continue;
 
-        var scanner = std.json.Scanner.initCompleteInput(allocator, trimmed);
-        defer scanner.deinit();
+        resetScanner(&scanner, trimmed);
 
         const start_token = scanner.next() catch {
             continue;
@@ -715,6 +717,18 @@ fn parseSharedPayloadField(
         return true;
     }
     return false;
+}
+
+fn resetScanner(scanner: *std.json.Scanner, input: []const u8) void {
+    scanner.state = .value;
+    scanner.string_is_object_key = false;
+    scanner.stack.bytes.clearRetainingCapacity();
+    scanner.stack.bit_len = 0;
+    scanner.value_start = 0;
+    scanner.input = input;
+    scanner.cursor = 0;
+    scanner.is_end_of_input = true;
+    scanner.diagnostics = null;
 }
 
 fn handlePayloadField(
