@@ -94,11 +94,6 @@ fn collectEvents(
     filters: Model.DateFilters,
     progress: ?std.Progress.Node,
 ) !void {
-    const SessionJob = struct {
-        path: []u8,
-        events_added: usize = 0,
-    };
-
     const SharedContext = struct {
         allocator: std.mem.Allocator,
         arena: std.mem.Allocator,
@@ -106,16 +101,20 @@ fn collectEvents(
         builder_mutex: *std.Thread.Mutex,
         filters: Model.DateFilters,
         progress: ?std.Progress.Node,
+        files_scanned: *std.atomic.Value(usize),
+        files_inflight: *std.atomic.Value(usize),
     };
 
     const ProcessFn = struct {
-        fn run(shared: *SharedContext, job: *SessionJob) void {
+        fn run(shared: *SharedContext, path: []u8) void {
+            defer shared.allocator.free(path);
+            defer _ = shared.files_inflight.fetchSub(1, .acq_rel);
+            defer _ = shared.files_scanned.fetchAdd(1, .acq_rel);
             defer if (shared.progress) |node| std.Progress.Node.completeOne(node);
-
             var local_events = std.ArrayListUnmanaged(Model.TokenUsageEvent){};
             defer local_events.deinit(shared.allocator);
 
-            const basename = std.fs.path.basename(job.path);
+            const basename = std.fs.path.basename(path);
             if (basename.len <= JSON_EXT.len or !std.mem.endsWith(u8, basename, JSON_EXT)) return;
             const session_id_slice = basename[0 .. basename.len - JSON_EXT.len];
 
@@ -124,7 +123,7 @@ fn collectEvents(
             };
             const session_id = maybe_session_id orelse return;
 
-            parseSessionFile(shared.allocator, shared.arena, session_id, job.path, &local_events) catch {
+            parseSessionFile(shared.allocator, shared.arena, session_id, path, &local_events) catch {
                 return;
             };
 
@@ -137,8 +136,6 @@ fn collectEvents(
                     return;
                 };
             }
-
-            job.events_added = local_events.items.len;
         }
     };
 
@@ -162,39 +159,11 @@ fn collectEvents(
     var walker = try root_dir.walk(allocator);
     defer walker.deinit();
 
-    var jobs = std.ArrayListUnmanaged(SessionJob){};
-    defer {
-        for (jobs.items) |job| allocator.free(job.path);
-        jobs.deinit(allocator);
-    }
-
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-        const relative_path = std.mem.sliceTo(entry.path, 0);
-        if (!std.mem.endsWith(u8, relative_path, JSON_EXT)) continue;
-
-        const absolute_path = try std.fs.path.join(allocator, &.{ sessions_dir, relative_path });
-        try jobs.append(allocator, .{ .path = absolute_path });
-    }
-
-    const files_processed = jobs.items.len;
-
-    if (progress) |node| {
-        std.Progress.Node.setEstimatedTotalItems(node, files_processed);
-        std.Progress.Node.setCompletedItems(node, 0);
-    }
-
-    if (files_processed == 0) {
-        std.log.info(
-            "codex.collectEvents: scanned 0 files, added 0 events in {d:.2}ms",
-            .{nsToMs(timer.read())},
-        );
-        return;
-    }
-
     var builder_mutex = std.Thread.Mutex{};
 
     var thread_safe_arena = std.heap.ThreadSafeAllocator{ .child_allocator = arena };
+    var files_scanned = std.atomic.Value(usize).init(0);
+    var files_inflight = std.atomic.Value(usize).init(0);
     var shared = SharedContext{
         .allocator = allocator,
         .arena = thread_safe_arena.allocator(),
@@ -202,6 +171,8 @@ fn collectEvents(
         .builder_mutex = &builder_mutex,
         .filters = filters,
         .progress = progress,
+        .files_scanned = &files_scanned,
+        .files_inflight = &files_inflight,
     };
 
     var threaded = std.Io.Threaded.init(allocator);
@@ -210,19 +181,33 @@ fn collectEvents(
     const io = threaded.io();
     var group = std.Io.Group.init;
 
-    for (jobs.items) |*job| {
-        group.async(io, ProcessFn.run, .{ &shared, job });
-    }
-    group.wait(io);
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file) continue;
+        const relative_path = std.mem.sliceTo(entry.path, 0);
+        if (!std.mem.endsWith(u8, relative_path, JSON_EXT)) continue;
 
-    var events_added: usize = 0;
-    for (jobs.items) |job| {
-        events_added += job.events_added;
+        const absolute_path = try std.fs.path.join(allocator, &.{ sessions_dir, relative_path });
+        _ = shared.files_inflight.fetchAdd(1, .acq_rel);
+        group.async(io, ProcessFn.run, .{ &shared, absolute_path });
+
+        if (progress) |node| {
+            const completed = shared.files_scanned.load(.acquire);
+            const inflight = shared.files_inflight.load(.acquire);
+            std.Progress.Node.setEstimatedTotalItems(node, completed + inflight);
+            std.Progress.Node.setCompletedItems(node, completed);
+        }
+    }
+
+    group.wait(io);
+    const final_completed = shared.files_scanned.load(.acquire);
+    if (progress) |node| {
+        std.Progress.Node.setEstimatedTotalItems(node, final_completed);
+        std.Progress.Node.setCompletedItems(node, final_completed);
     }
 
     std.log.info(
-        "codex.collectEvents: scanned {d} files, added {d} events in {d:.2}ms",
-        .{ files_processed, events_added, nsToMs(timer.read()) },
+        "codex.collectEvents: scanned {d} files in {d:.2}ms",
+        .{ final_completed, nsToMs(timer.read()) },
     );
 }
 
