@@ -42,6 +42,69 @@ pub const providers = [_]ProviderSpec{
 const provider_name_list = initProviderNames();
 pub const provider_list_description = initProviderListDescription();
 
+const SummaryResult = struct {
+    builder: Model.SummaryBuilder,
+    totals: Model.SummaryTotals,
+
+    fn deinit(self: *SummaryResult, allocator: std.mem.Allocator) void {
+        self.builder.deinit(allocator);
+        self.totals.deinit(allocator);
+    }
+};
+
+const ArrayWriter = struct {
+    base: std.Io.Writer,
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+
+    fn init(list: *std.ArrayList(u8), allocator: std.mem.Allocator) ArrayWriter {
+        return .{
+            .base = .{
+                .vtable = &.{
+                    .drain = ArrayWriter.drain,
+                    .sendFile = std.Io.Writer.unimplementedSendFile,
+                    .flush = ArrayWriter.flush,
+                    .rebase = std.Io.Writer.defaultRebase,
+                },
+                .buffer = &.{},
+            },
+            .list = list,
+            .allocator = allocator,
+        };
+    }
+
+    fn writer(self: *ArrayWriter) *std.Io.Writer {
+        return &self.base;
+    }
+
+    fn drain(
+        writer_ptr: *std.Io.Writer,
+        data: []const []const u8,
+        splat: usize,
+    ) std.Io.Writer.Error!usize {
+        const self: *ArrayWriter = @fieldParentPtr("base", writer_ptr);
+        var written: usize = 0;
+        for (data) |chunk| {
+            if (chunk.len == 0) continue;
+            self.list.appendSlice(self.allocator, chunk) catch return error.WriteFailed;
+            written += chunk.len;
+        }
+        if (splat > 1 and data.len != 0) {
+            const last = data[data.len - 1];
+            const extra = splat - 1;
+            for (0..extra) |_| {
+                self.list.appendSlice(self.allocator, last) catch return error.WriteFailed;
+                written += last.len;
+            }
+        }
+        return written;
+    }
+
+    fn flush(_: *std.Io.Writer) std.Io.Writer.Error!void {
+        return;
+    }
+};
+
 fn initProviderNames() [providers.len][]const u8 {
     var names: [providers.len][]const u8 = undefined;
     inline for (providers, 0..) |provider, idx| {
@@ -111,106 +174,26 @@ pub fn findProviderIndex(name: []const u8) ?usize {
 }
 
 pub fn run(allocator: std.mem.Allocator, filters: DateFilters, selection: ProviderSelection) !void {
-    const disable_progress = !std.fs.File.stdout().isTty();
-    var progress_root: std.Progress.Node = undefined;
-    if (!disable_progress) {
-        progress_root = std.Progress.start(.{ .root_name = "Tokenuze" });
-    }
-    defer if (!disable_progress) std.Progress.Node.end(progress_root);
-    errdefer if (!disable_progress) std.Progress.setStatus(.failure);
-    const progress_parent = if (!disable_progress) &progress_root else null;
-
-    var total_timer = try std.time.Timer.start();
-
-    var pricing_map = Model.PricingMap.init(allocator);
-    defer pricing_map.deinit();
-
-    var summary_builder = Model.SummaryBuilder.init(allocator);
-    defer summary_builder.deinit(allocator);
-
-    const temp_allocator = std.heap.page_allocator;
-
-    for (providers, 0..) |provider, idx| {
-        if (!selection.includesIndex(idx)) continue;
-        const before_events = summary_builder.eventCount();
-        const before_pricing = pricing_map.count();
-        var collect_phase = try PhaseTracker.start(progress_parent, provider.phase_label, 0);
-        try provider.collect(allocator, temp_allocator, &summary_builder, filters, &pricing_map, collect_phase.progress());
-        const elapsed = collect_phase.elapsedMs();
-        collect_phase.finish();
-        std.log.info(
-            "phase.{s} completed in {d:.2}ms (events += {d}, total_events={d}, pricing_models={d}, pricing_added={d})",
-            .{
-                provider.phase_label,
-                elapsed,
-                summary_builder.eventCount() - before_events,
-                summary_builder.eventCount(),
-                pricing_map.count(),
-                pricing_map.count() - before_pricing,
-            },
-        );
-    }
+    const enable_progress = std.fs.File.stdout().isTty();
+    var summary = try collectSummary(allocator, filters, selection, enable_progress);
+    defer summary.deinit(allocator);
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const out_writer = &stdout_writer.interface;
-
-    var summaries = summary_builder.items();
-    if (summaries.len == 0) {
-        std.log.info("no events to process; total runtime {d:.2}ms", .{nsToMs(total_timer.read())});
-        var totals = SummaryTotals.init();
-        defer totals.deinit(allocator);
-        try render.Renderer.writeSummary(out_writer, summaries, &totals, filters.pretty_output);
-        try flushOutput(out_writer);
-        if (!disable_progress) std.Progress.setStatus(.success);
-        return;
-    }
-
-    var missing_set = std.StringHashMap(u8).init(allocator);
-    defer missing_set.deinit();
-
-    var pricing_phase = try PhaseTracker.start(progress_parent, "apply pricing", summaries.len);
-    defer pricing_phase.finish();
-    for (summaries) |*summary| {
-        Model.applyPricing(allocator, summary, &pricing_map, &missing_set);
-        std.sort.pdq(ModelSummary, summary.models.items, {}, modelLessThan);
-        if (pricing_phase.progress()) |node| std.Progress.Node.completeOne(node);
-    }
-    std.log.info(
-        "phase.apply_pricing completed in {d:.2}ms (days={d})",
-        .{ pricing_phase.elapsedMs(), summaries.len },
-    );
-
-    var sort_days_phase = try PhaseTracker.start(progress_parent, "sort days", 0);
-    defer sort_days_phase.finish();
-    std.sort.pdq(DailySummary, summaries, {}, summaryLessThan);
-    std.log.info(
-        "phase.sort_days completed in {d:.2}ms (days={d})",
-        .{ sort_days_phase.elapsedMs(), summaries.len },
-    );
-
-    var totals = SummaryTotals.init();
-    defer totals.deinit(allocator);
-    var totals_phase = try PhaseTracker.start(progress_parent, "totals", 0);
-    defer totals_phase.finish();
-    Model.accumulateTotals(allocator, summaries, &totals);
-    try Model.collectMissingModels(allocator, &missing_set, &totals.missing_pricing);
-    std.log.info(
-        "phase.totals completed in {d:.2}ms (missing_pricing={d})",
-        .{ totals_phase.elapsedMs(), totals.missing_pricing.items.len },
-    );
-
-    var output_phase = try PhaseTracker.start(progress_parent, "write output", 0);
-    defer output_phase.finish();
-    try render.Renderer.writeSummary(out_writer, summaries, &totals, filters.pretty_output);
-    std.log.info(
-        "phase.write_json completed in {d:.2}ms (days={d})",
-        .{ output_phase.elapsedMs(), summaries.len },
-    );
-
+    try render.Renderer.writeSummary(out_writer, summary.builder.items(), &summary.totals, filters.pretty_output);
     try flushOutput(out_writer);
-    std.log.info("phase.total runtime {d:.2}ms", .{nsToMs(total_timer.read())});
-    if (!disable_progress) std.Progress.setStatus(.success);
+}
+
+pub fn renderSummaryAlloc(allocator: std.mem.Allocator, filters: DateFilters, selection: ProviderSelection) ![]u8 {
+    var summary = try collectSummary(allocator, filters, selection, false);
+    defer summary.deinit(allocator);
+
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(allocator);
+    var writer_state = ArrayWriter.init(&buffer, allocator);
+    try render.Renderer.writeSummary(writer_state.writer(), summary.builder.items(), &summary.totals, filters.pretty_output);
+    return buffer.toOwnedSlice(allocator);
 }
 
 const PhaseTracker = struct {
@@ -246,6 +229,101 @@ fn flushOutput(writer: anytype) !void {
         error.WriteFailed => {},
         else => return err,
     };
+}
+
+fn collectSummary(
+    allocator: std.mem.Allocator,
+    filters: DateFilters,
+    selection: ProviderSelection,
+    enable_progress: bool,
+) !SummaryResult {
+    var summary_builder = Model.SummaryBuilder.init(allocator);
+    errdefer summary_builder.deinit(allocator);
+
+    var totals = SummaryTotals.init();
+    errdefer totals.deinit(allocator);
+
+    var pricing_map = Model.PricingMap.init(allocator);
+    errdefer pricing_map.deinit();
+
+    const temp_allocator = std.heap.page_allocator;
+
+    var progress_root: std.Progress.Node = undefined;
+    const progress_parent = if (enable_progress) blk: {
+        progress_root = std.Progress.start(.{ .root_name = "Tokenuze" });
+        break :blk &progress_root;
+    } else null;
+    defer if (enable_progress) std.Progress.Node.end(progress_root);
+    if (enable_progress) {
+        errdefer std.Progress.setStatus(.failure);
+    }
+
+    var total_timer = try std.time.Timer.start();
+
+    for (providers, 0..) |provider, idx| {
+        if (!selection.includesIndex(idx)) continue;
+        const before_events = summary_builder.eventCount();
+        const before_pricing = pricing_map.count();
+        var collect_phase = try PhaseTracker.start(progress_parent, provider.phase_label, 0);
+        try provider.collect(allocator, temp_allocator, &summary_builder, filters, &pricing_map, collect_phase.progress());
+        const elapsed = collect_phase.elapsedMs();
+        collect_phase.finish();
+        std.log.info(
+            "phase.{s} completed in {d:.2}ms (events += {d}, total_events={d}, pricing_models={d}, pricing_added={d})",
+            .{
+                provider.phase_label,
+                elapsed,
+                summary_builder.eventCount() - before_events,
+                summary_builder.eventCount(),
+                pricing_map.count(),
+                pricing_map.count() - before_pricing,
+            },
+        );
+    }
+
+    var summaries = summary_builder.items();
+    if (summaries.len == 0) {
+        std.log.info("no events to process; total runtime {d:.2}ms", .{nsToMs(total_timer.read())});
+        if (enable_progress) std.Progress.setStatus(.success);
+        return SummaryResult{ .builder = summary_builder, .totals = totals };
+    }
+
+    var missing_set = std.StringHashMap(u8).init(allocator);
+    defer missing_set.deinit();
+
+    var pricing_phase = try PhaseTracker.start(progress_parent, "apply pricing", summaries.len);
+    for (summaries) |*summary| {
+        Model.applyPricing(allocator, summary, &pricing_map, &missing_set);
+        std.sort.pdq(ModelSummary, summary.models.items, {}, modelLessThan);
+        if (pricing_phase.progress()) |node| std.Progress.Node.completeOne(node);
+    }
+    pricing_phase.finish();
+    std.log.info(
+        "phase.apply_pricing completed in {d:.2}ms (days={d})",
+        .{ pricing_phase.elapsedMs(), summaries.len },
+    );
+
+    var sort_days_phase = try PhaseTracker.start(progress_parent, "sort days", 0);
+    std.sort.pdq(DailySummary, summaries, {}, summaryLessThan);
+    sort_days_phase.finish();
+    std.log.info(
+        "phase.sort_days completed in {d:.2}ms (days={d})",
+        .{ sort_days_phase.elapsedMs(), summaries.len },
+    );
+
+    var totals_phase = try PhaseTracker.start(progress_parent, "totals", 0);
+    Model.accumulateTotals(allocator, summaries, &totals);
+    try Model.collectMissingModels(allocator, &missing_set, &totals.missing_pricing);
+    totals_phase.finish();
+    std.log.info(
+        "phase.totals completed in {d:.2}ms (missing_pricing={d})",
+        .{ totals_phase.elapsedMs(), totals.missing_pricing.items.len },
+    );
+
+    std.log.info("phase.total runtime {d:.2}ms", .{nsToMs(total_timer.read())});
+    if (enable_progress) std.Progress.setStatus(.success);
+
+    return SummaryResult{ .builder = summary_builder, .totals = totals };
 }
 
 fn summaryLessThan(_: void, lhs: DailySummary, rhs: DailySummary) bool {

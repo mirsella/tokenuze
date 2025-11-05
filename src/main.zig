@@ -53,7 +53,9 @@ pub fn main() !void {
         return;
     }
     if (options.upload) {
-        try tokenuze.uploader.run(allocator, options.filters);
+        const summary_payload = try tokenuze.renderSummaryAlloc(allocator, options.filters, options.providers);
+        defer allocator.free(summary_payload);
+        try tokenuze.uploader.run(allocator, summary_payload);
         return;
     }
     try tokenuze.run(allocator, options.filters, options.providers);
@@ -152,15 +154,6 @@ fn parseOptions(allocator: std.mem.Allocator) CliError!CliOptions {
         }
     }
 
-    if (options.upload) {
-        const codex_index = tokenuze.findProviderIndex("codex") orelse {
-            return cliError("--upload requires the codex provider to be available", .{});
-        };
-        if (!options.providers.includesIndex(codex_index)) {
-            return cliError("--upload requires --agent codex (and may include others)", .{});
-        }
-    }
-
     return options;
 }
 
@@ -200,7 +193,7 @@ fn printHelp() !void {
         .{ .label = "--until YYYYMMDD", .desc = "Only include events on/before the date" },
         .{ .label = "--pretty", .desc = "Expand JSON output for readability" },
         .{ .label = "--agent <name>", .desc = agent_desc },
-        .{ .label = "--upload", .desc = "Upload Codex usage via DASHBOARD_API_* envs (Codex only)" },
+        .{ .label = "--upload", .desc = "Upload Tokenuze JSON via DASHBOARD_API_* envs" },
         .{ .label = "--machine-id", .desc = "Print the stable machine id and exit" },
         .{ .label = "--version", .desc = "Print the Tokenuze version and exit" },
         .{ .label = "-h, --help", .desc = "Show this message and exit" },
