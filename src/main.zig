@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const tokenuze = @import("tokenuze");
 
 const CliError = error{
@@ -11,11 +12,23 @@ const CliOptions = struct {
     providers: tokenuze.ProviderSelection = tokenuze.ProviderSelection.initAll(),
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+var debug_allocator = std.heap.DebugAllocator(.{}){};
 
-    const allocator = gpa.allocator();
+pub fn main() !void {
+    const native_os = builtin.target.os.tag;
+    const choice = blk: {
+        if (native_os == .wasi) break :blk .{ .allocator = std.heap.wasm_allocator, .is_debug = false };
+        break :blk switch (builtin.mode) {
+            .Debug, .ReleaseSafe => .{ .allocator = debug_allocator.allocator(), .is_debug = true },
+            .ReleaseFast, .ReleaseSmall => .{ .allocator = std.heap.smp_allocator, .is_debug = false },
+        };
+    };
+    defer if (choice.is_debug) {
+        _ = debug_allocator.deinit();
+    };
+
+    const allocator = choice.allocator;
+
     const options = parseOptions(allocator) catch {
         std.process.exit(1);
     };
