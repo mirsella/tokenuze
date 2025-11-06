@@ -1,8 +1,11 @@
 const std = @import("std");
+const machine_id = @import("machine_id.zig");
 
 const DEFAULT_API_URL = "http://localhost:8000";
+const empty_sessions_json = "{\"sessions\":[],\"totals\":{}}";
+const empty_weekly_json = "{\"weekly\":[]}";
 
-pub fn run(allocator: std.mem.Allocator, payload: []const u8) !void {
+pub fn run(allocator: std.mem.Allocator, daily_summary: []const u8) !void {
     var env = try EnvConfig.load(allocator);
     defer env.deinit(allocator);
 
@@ -11,9 +14,16 @@ pub fn run(allocator: std.mem.Allocator, payload: []const u8) !void {
     const endpoint = try buildEndpoint(allocator, env.api_url);
     defer allocator.free(endpoint);
 
+    const machine = try machine_id.getMachineId(allocator);
+    const machine_slice = machine[0..];
+    std.log.info("Machine ID: {s}", .{machine_slice});
+
+    const payload = try buildCodexPayload(allocator, machine_slice, daily_summary);
+    defer allocator.free(payload);
+
     std.log.info("Uploading summary to {s}...", .{endpoint});
-    var response = sendPayload(allocator, endpoint, env.api_key, @constCast(payload)) catch |err| {
-        std.debug.print("Connection failed. Is the server running at {s}?\n", .{env.api_url});
+    var response = sendPayload(allocator, endpoint, env.api_key, payload) catch |err| {
+        std.log.err("Connection failed. Is the server running at {s}? ({s})", .{ env.api_url, @errorName(err) });
         return err;
     };
     defer response.deinit(allocator);
@@ -227,6 +237,44 @@ fn buildEndpoint(allocator: std.mem.Allocator, base: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/api/usage/report", .{trimmed});
 }
 
+fn buildCodexPayload(
+    allocator: std.mem.Allocator,
+    machine: []const u8,
+    daily_summary: []const u8,
+) ![]u8 {
+    const trimmed_daily = std.mem.trim(u8, daily_summary, " \n\r\t");
+    const timestamp = try currentTimestampIso8601(allocator);
+    defer allocator.free(timestamp);
+
+    const hostname = try resolveHostname(allocator);
+    defer allocator.free(hostname);
+
+    const username = try resolveUsername(allocator);
+    defer allocator.free(username);
+
+    const display_name = try std.fmt.allocPrint(allocator, "{s}@{s}", .{ username, hostname });
+    defer allocator.free(display_name);
+
+    const payload = Payload{
+        .timestamp = timestamp,
+        .machineId = machine,
+        .hostname = hostname,
+        .displayName = display_name,
+        .codex = .{
+            .sessions = .{ .text = empty_sessions_json },
+            .daily = .{ .text = trimmed_daily },
+            .weekly = .{ .text = empty_weekly_json },
+        },
+    };
+
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(allocator);
+    var writer_state = ArrayWriter.init(&buffer, allocator);
+    var stringify = std.json.Stringify{ .writer = writer_state.writer(), .options = .{} };
+    try stringify.write(payload);
+    return buffer.toOwnedSlice(allocator);
+}
+
 fn defaultPort(protocol: std.http.Client.Protocol) u16 {
     return switch (protocol) {
         .plain => 80,
@@ -243,23 +291,170 @@ fn trimTrailingSlash(value: []const u8) []const u8 {
 fn handleResponse(response: HttpResponse) void {
     switch (response.status) {
         .ok => {
-            std.debug.print("Usage reported successfully\n", .{});
+            std.log.info("Usage reported successfully", .{});
         },
         .unauthorized => {
-            std.debug.print("Authentication failed: Invalid or inactive API key\n", .{});
+            std.log.err("Authentication failed: Invalid or inactive API key", .{});
         },
         .unprocessable_entity => {
-            std.debug.print("Data validation error. See server logs for details.\n", .{});
+            std.log.err("Data validation error. See server logs for details.", .{});
         },
         .internal_server_error => {
-            std.debug.print("Server error. Please try again later.\n", .{});
+            std.log.err("Server error. Please try again later.", .{});
         },
         else => {
-            std.debug.print(
-                "Failed to report usage (HTTP {d})\n",
-                .{@intFromEnum(response.status)},
-            );
-            std.debug.print("Check server logs for diagnostics.\n", .{});
+            std.log.err("Failed to report usage (HTTP {d}). Check server logs for diagnostics.", .{@intFromEnum(response.status)});
         },
     }
+}
+
+const Payload = struct {
+    timestamp: []const u8,
+    machineId: []const u8,
+    hostname: []const u8,
+    displayName: []const u8,
+    codex: ProviderBlock,
+};
+
+const ProviderBlock = struct {
+    sessions: RawJson,
+    daily: RawJson,
+    weekly: RawJson,
+};
+
+const RawJson = struct {
+    text: []const u8,
+
+    pub fn jsonStringify(self: RawJson, jw: anytype) !void {
+        try jw.beginWriteRaw();
+        try jw.writer.writeAll(self.text);
+        jw.endWriteRaw();
+    }
+};
+
+const ArrayWriter = struct {
+    base: std.Io.Writer,
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+
+    fn init(list: *std.ArrayList(u8), allocator: std.mem.Allocator) ArrayWriter {
+        return .{
+            .base = .{
+                .vtable = &.{
+                    .drain = ArrayWriter.drain,
+                    .sendFile = std.Io.Writer.unimplementedSendFile,
+                    .flush = ArrayWriter.flush,
+                    .rebase = std.Io.Writer.defaultRebase,
+                },
+                .buffer = &.{},
+            },
+            .list = list,
+            .allocator = allocator,
+        };
+    }
+
+    fn writer(self: *ArrayWriter) *std.Io.Writer {
+        return &self.base;
+    }
+
+    fn drain(
+        writer_ptr: *std.Io.Writer,
+        data: []const []const u8,
+        splat: usize,
+    ) std.Io.Writer.Error!usize {
+        const self: *ArrayWriter = @fieldParentPtr("base", writer_ptr);
+        var written: usize = 0;
+        for (data) |chunk| {
+            if (chunk.len == 0) continue;
+            self.list.appendSlice(self.allocator, chunk) catch return error.WriteFailed;
+            written += chunk.len;
+        }
+        if (splat > 1 and data.len != 0) {
+            const last = data[data.len - 1];
+            const extra = splat - 1;
+            for (0..extra) |_| {
+                self.list.appendSlice(self.allocator, last) catch return error.WriteFailed;
+                written += last.len;
+            }
+        }
+        return written;
+    }
+
+    fn flush(_: *std.Io.Writer) std.Io.Writer.Error!void {
+        return;
+    }
+};
+
+fn resolveHostname(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "HOSTNAME")) |value| {
+        return value;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    if (std.process.getEnvVarOwned(allocator, "COMPUTERNAME")) |value| {
+        return value;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    var buf: [hostnameBufferLen()]u8 = undefined;
+    const host = std.posix.gethostname(&buf) catch {
+        return allocator.dupe(u8, "unknown-host");
+    };
+    return allocator.dupe(u8, host);
+}
+
+fn resolveUsername(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "USER")) |value| {
+        return value;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    if (std.process.getEnvVarOwned(allocator, "USERNAME")) |value| {
+        return value;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    return allocator.dupe(u8, "unknown");
+}
+
+fn hostnameBufferLen() usize {
+    return comptime blk: {
+        if (@TypeOf(std.posix.HOST_NAME_MAX) == void) break :blk 256;
+        break :blk std.posix.HOST_NAME_MAX;
+    };
+}
+
+fn currentTimestampIso8601(allocator: std.mem.Allocator) ![]u8 {
+    const spec = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch {
+        return allocator.dupe(u8, "1970-01-01T00:00:00Z");
+    };
+    const raw_secs = if (@hasField(std.posix.timespec, "tv_sec"))
+        @field(spec, "tv_sec")
+    else
+        @field(spec, "sec");
+    const epoch = std.time.epoch.EpochSeconds{ .secs = @as(u64, @intCast(raw_secs)) };
+    const epoch_day = epoch.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = epoch.getDaySeconds();
+    return std.fmt.allocPrint(
+        allocator,
+        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
+        .{
+            year_day.year,
+            month_day.month.numeric(),
+            @as(u8, month_day.day_index) + 1,
+            day_seconds.getHoursIntoDay(),
+            day_seconds.getMinutesIntoHour(),
+            day_seconds.getSecondsIntoMinute(),
+        },
+    );
 }
