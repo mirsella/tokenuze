@@ -151,17 +151,17 @@ fn sendWithFallback(
     extra_headers: []const std.http.Header,
     payload: []u8,
 ) !HttpResponse {
-    return sendOnce(client, uri, extra_headers, payload, null) catch |err| switch (err) {
+    return sendRequest(client, uri, extra_headers, payload, null) catch |err| switch (err) {
         error.InvalidDnsCnameRecord => {
             std.log.warn("Zig DNS resolver failed for {s}; falling back to libc resolver", .{host_name.bytes});
             const connection = try connectWithLibcResolver(allocator, client, uri, protocol, host_name) orelse return err;
-            return sendOnce(client, uri, extra_headers, payload, connection);
+            return sendRequest(client, uri, extra_headers, payload, connection);
         },
         else => return err,
     };
 }
 
-fn sendOnce(
+fn sendRequest(
     client: *std.http.Client,
     uri: std.Uri,
     extra_headers: []const std.http.Header,

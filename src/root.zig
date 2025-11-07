@@ -284,7 +284,7 @@ fn collectSummaryInternal(
     var total_timer = try std.time.Timer.start();
 
     if (!selection.isEmpty()) {
-        try loadPricingOnce(allocator, temp_allocator, selection, &pricing_map, progress_parent);
+        try loadPricing(allocator, temp_allocator, selection, &pricing_map, progress_parent);
     }
 
     for (providers, 0..) |provider, idx| {
@@ -368,7 +368,7 @@ fn collectSummaryInternal(
     return SummaryResult{ .builder = summary_builder, .totals = totals };
 }
 
-fn loadPricingOnce(
+fn loadPricing(
     allocator: std.mem.Allocator,
     temp_allocator: std.mem.Allocator,
     selection: ProviderSelection,
@@ -379,7 +379,7 @@ fn loadPricingOnce(
     defer pricing_phase.finish();
 
     const before_models = pricing.count();
-    const remote_stats = try session_provider.loadRemotePricingOnce(allocator, temp_allocator, pricing);
+    const remote_stats = try session_provider.loadRemotePricing(allocator, temp_allocator, pricing);
     if (remote_stats.attempted) {
         if (remote_stats.failure) |err| {
             std.log.warn(

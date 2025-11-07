@@ -32,7 +32,7 @@ pub const RemotePricingStats = struct {
     failure: ?anyerror = null,
 };
 
-pub fn loadRemotePricingOnce(
+pub fn loadRemotePricing(
     shared_allocator: std.mem.Allocator,
     temp_allocator: std.mem.Allocator,
     pricing: *Model.PricingMap,
