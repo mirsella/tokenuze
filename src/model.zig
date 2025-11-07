@@ -96,16 +96,6 @@ pub const RawTokenUsage = struct {
     total_tokens: u64 = 0,
 };
 
-pub const TokenBuffer = struct {
-    slice: []const u8,
-    owned: ?[]u8 = null,
-
-    pub fn release(self: *TokenBuffer, allocator: std.mem.Allocator) void {
-        if (self.owned) |buf| allocator.free(buf);
-        self.* = undefined;
-    }
-};
-
 pub const UsageAccumulator = struct {
     raw: RawTokenUsage = .{},
     cached_direct: ?u64 = null,
@@ -120,6 +110,25 @@ pub const UsageAccumulator = struct {
             .output_tokens => self.raw.output_tokens = value,
             .reasoning_output_tokens => self.raw.reasoning_output_tokens = value,
             .total_tokens => self.raw.total_tokens = value,
+        }
+    }
+
+    pub fn addField(self: *UsageAccumulator, field: UsageField, value: u64) void {
+        if (value == 0) return;
+        switch (field) {
+            .input_tokens => self.raw.input_tokens = self.raw.input_tokens +| value,
+            .cache_creation_input_tokens => self.raw.cache_creation_input_tokens = self.raw.cache_creation_input_tokens +| value,
+            .cached_input_tokens => {
+                const current = self.cached_direct orelse 0;
+                self.cached_direct = current +| value;
+            },
+            .cache_read_input_tokens => {
+                const current = self.cached_fallback orelse 0;
+                self.cached_fallback = current +| value;
+            },
+            .output_tokens => self.raw.output_tokens = self.raw.output_tokens +| value,
+            .reasoning_output_tokens => self.raw.reasoning_output_tokens = self.raw.reasoning_output_tokens +| value,
+            .total_tokens => self.raw.total_tokens = self.raw.total_tokens +| value,
         }
     }
 
