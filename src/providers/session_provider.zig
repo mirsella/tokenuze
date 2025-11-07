@@ -105,10 +105,8 @@ const PricingFeedParser = struct {
     pricing: *Model.PricingMap,
 
     pub fn parse(self: *PricingFeedParser, reader: *std.json.Reader) !void {
-        var key_buffer = std.array_list.Managed(u8).init(self.temp_allocator);
-        defer key_buffer.deinit();
-        var scratch = std.array_list.Managed(u8).init(self.temp_allocator);
-        defer scratch.deinit();
+        var alias_buffer: std.ArrayList(u8) = .empty;
+        defer alias_buffer.deinit(self.temp_allocator);
 
         if ((try reader.next()) != .object_begin) return error.InvalidResponse;
 
@@ -122,12 +120,12 @@ const PricingFeedParser = struct {
                     }
                 },
                 .string => {
-                    const name_slice = try readStringValue(reader, &key_buffer);
-                    const maybe_pricing = try self.parseEntry(reader, &scratch);
+                    var name = try JsonTokenSlice.fromString(self.temp_allocator, reader);
+                    defer name.deinit(self.temp_allocator);
+                    const maybe_pricing = try self.parseEntry(self.temp_allocator, reader);
                     if (maybe_pricing) |entry| {
-                        try self.insertPricingEntries(name_slice, entry);
+                        try self.insertPricingEntries(name.view(), entry, &alias_buffer);
                     }
-                    key_buffer.clearRetainingCapacity();
                 },
                 else => return error.InvalidResponse,
             }
@@ -136,8 +134,8 @@ const PricingFeedParser = struct {
 
     fn parseEntry(
         self: *PricingFeedParser,
+        scratch_allocator: std.mem.Allocator,
         reader: *std.json.Reader,
-        scratch: *std.array_list.Managed(u8),
     ) !?Model.ModelPricing {
         _ = self;
         if ((try reader.next()) != .object_begin) {
@@ -157,15 +155,16 @@ const PricingFeedParser = struct {
                     break;
                 },
                 .string => {
-                    const field = try readStringValue(reader, scratch);
-                    if (std.mem.eql(u8, field, "input_cost_per_token")) {
-                        input_rate = try readNumber(reader, scratch);
-                    } else if (std.mem.eql(u8, field, "output_cost_per_token")) {
-                        output_rate = try readNumber(reader, scratch);
-                    } else if (std.mem.eql(u8, field, "cache_creation_input_token_cost")) {
-                        cache_creation_rate = try readNumber(reader, scratch);
-                    } else if (std.mem.eql(u8, field, "cache_read_input_token_cost")) {
-                        cached_rate = try readNumber(reader, scratch);
+                    var field = try JsonTokenSlice.fromString(scratch_allocator, reader);
+                    defer field.deinit(scratch_allocator);
+                    if (std.mem.eql(u8, field.view(), "input_cost_per_token")) {
+                        input_rate = try readNumberValue(scratch_allocator, reader);
+                    } else if (std.mem.eql(u8, field.view(), "output_cost_per_token")) {
+                        output_rate = try readNumberValue(scratch_allocator, reader);
+                    } else if (std.mem.eql(u8, field.view(), "cache_creation_input_token_cost")) {
+                        cache_creation_rate = try readNumberValue(scratch_allocator, reader);
+                    } else if (std.mem.eql(u8, field.view(), "cache_read_input_token_cost")) {
+                        cached_rate = try readNumberValue(scratch_allocator, reader);
                     } else {
                         try reader.skipValue();
                     }
@@ -185,15 +184,47 @@ const PricingFeedParser = struct {
         };
     }
 
-    fn insertPricingEntries(self: *PricingFeedParser, name: []const u8, entry: Model.ModelPricing) !void {
+    fn insertPricingEntries(
+        self: *PricingFeedParser,
+        name: []const u8,
+        entry: Model.ModelPricing,
+        alias_buffer: *std.ArrayList(u8),
+    ) !void {
         try self.putPricing(name, entry);
 
         if (std.mem.lastIndexOfScalar(u8, name, '/')) |idx| {
             const alias = name[idx + 1 ..];
             if (alias.len != 0 and !std.mem.eql(u8, alias, name)) {
                 try self.putPricing(alias, entry);
+                try self.insertAtDateAlias(alias, entry, alias_buffer);
             }
         }
+
+        try self.insertAtDateAlias(name, entry, alias_buffer);
+    }
+
+    fn insertAtDateAlias(
+        self: *PricingFeedParser,
+        name: []const u8,
+        entry: Model.ModelPricing,
+        alias_buffer: *std.ArrayList(u8),
+    ) !void {
+        const at_idx = std.mem.indexOfScalar(u8, name, '@') orelse return;
+        const suffix = name[at_idx + 1 ..];
+        if (!looksLikeDateSuffix(suffix)) return;
+
+        alias_buffer.clearRetainingCapacity();
+        try alias_buffer.print(self.temp_allocator, "{s}-{s}", .{ name[0..at_idx], suffix });
+
+        try self.putPricing(alias_buffer.items, entry);
+    }
+
+    fn looksLikeDateSuffix(suffix: []const u8) bool {
+        if (suffix.len != 8) return false;
+        for (suffix) |ch| {
+            if (!std.ascii.isDigit(ch)) return false;
+        }
+        return true;
     }
 
     fn putPricing(self: *PricingFeedParser, key: []const u8, entry: Model.ModelPricing) !void {
@@ -204,23 +235,49 @@ const PricingFeedParser = struct {
     }
 };
 
-fn readStringValue(
-    reader: *std.json.Reader,
-    buffer: *std.array_list.Managed(u8),
-) ![]const u8 {
-    buffer.clearRetainingCapacity();
-    const slice = try reader.allocNextIntoArrayList(buffer, .alloc_if_needed);
-    return slice orelse buffer.items;
-}
+/// Token returned by `std.json.Reader.nextAlloc`, remembering whether storage
+/// was borrowed from the reader buffer or newly allocated.
+const JsonTokenSlice = union(enum) {
+    borrowed: []const u8,
+    owned: []u8,
 
-fn readNumber(
-    reader: *std.json.Reader,
-    buffer: *std.array_list.Managed(u8),
-) !f64 {
-    buffer.clearRetainingCapacity();
-    const slice = try reader.allocNextIntoArrayList(buffer, .alloc_if_needed);
-    const number_slice = slice orelse buffer.items;
-    return std.fmt.parseFloat(f64, number_slice) catch return error.InvalidNumber;
+    fn view(self: JsonTokenSlice) []const u8 {
+        return switch (self) {
+            .borrowed, .owned => |val| val,
+        };
+    }
+
+    fn deinit(self: *JsonTokenSlice, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .borrowed => {},
+            .owned => |buf| allocator.free(buf),
+        }
+        self.* = JsonTokenSlice{ .borrowed = "" };
+    }
+
+    fn fromString(allocator: std.mem.Allocator, reader: *std.json.Reader) !JsonTokenSlice {
+        const token = try reader.nextAlloc(allocator, .alloc_if_needed);
+        return switch (token) {
+            .string => |slice| .{ .borrowed = slice },
+            .allocated_string => |buf| .{ .owned = buf },
+            else => error.UnexpectedToken,
+        };
+    }
+
+    fn fromNumber(allocator: std.mem.Allocator, reader: *std.json.Reader) !JsonTokenSlice {
+        const token = try reader.nextAlloc(allocator, .alloc_if_needed);
+        return switch (token) {
+            .number => |slice| .{ .borrowed = slice },
+            .allocated_number => |buf| .{ .owned = buf },
+            else => error.UnexpectedToken,
+        };
+    }
+};
+
+fn readNumberValue(allocator: std.mem.Allocator, reader: *std.json.Reader) !f64 {
+    var buffered = try JsonTokenSlice.fromNumber(allocator, reader);
+    defer buffered.deinit(allocator);
+    return std.fmt.parseFloat(f64, buffered.view()) catch return error.InvalidNumber;
 }
 
 pub fn Provider(comptime cfg: ProviderConfig) type {
@@ -1802,6 +1859,8 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
             const allocator = std.testing.allocator;
             var pricing = Model.PricingMap.init(allocator);
             defer Model.deinitPricingMap(&pricing, allocator);
+            var alias_buffer: std.ArrayList(u8) = .empty;
+            defer alias_buffer.deinit(allocator);
 
             var parser = PricingFeedParser{
                 .allocator = allocator,
@@ -1815,7 +1874,7 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
                 .cached_input_cost_per_m = 1,
                 .output_cost_per_m = 1,
             };
-            try parser.insertPricingEntries("gemini/gemini-flash-latest", pricing_entry);
+            try parser.insertPricingEntries("gemini/gemini-flash-latest", pricing_entry, &alias_buffer);
 
             try std.testing.expect(pricing.get("gemini/gemini-flash-latest") != null);
             try std.testing.expect(pricing.get("gemini-flash-latest") != null);
