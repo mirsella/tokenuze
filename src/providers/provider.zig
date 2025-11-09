@@ -514,6 +514,7 @@ const PricingFeedParser = struct {
     allocator: std.mem.Allocator,
     temp_allocator: std.mem.Allocator,
     pricing: *Model.PricingMap,
+    const AliasError = error{OutOfMemory};
 
     pub fn parse(self: *PricingFeedParser, reader: *std.json.Reader) !void {
         var alias_buffer: std.ArrayList(u8) = .empty;
@@ -600,49 +601,17 @@ const PricingFeedParser = struct {
         name: []const u8,
         entry: Model.ModelPricing,
         alias_buffer: *std.ArrayList(u8),
-    ) !void {
-        try self.putPricing(name, entry);
-
-        if (std.mem.lastIndexOfScalar(u8, name, '/')) |idx| {
-            const alias = name[idx + 1 ..];
-            if (alias.len != 0 and !std.mem.eql(u8, alias, name)) {
-                try self.putPricing(alias, entry);
-                try self.insertAtDateAlias(alias, entry, alias_buffer);
-            }
-        }
-
-        try self.insertAtDateAlias(name, entry, alias_buffer);
+    ) AliasError!void {
+        _ = alias_buffer;
+        _ = try self.putPricing(name, entry);
     }
 
-    fn insertAtDateAlias(
-        self: *PricingFeedParser,
-        name: []const u8,
-        entry: Model.ModelPricing,
-        alias_buffer: *std.ArrayList(u8),
-    ) !void {
-        const at_idx = std.mem.indexOfScalar(u8, name, '@') orelse return;
-        const suffix = name[at_idx + 1 ..];
-        if (!looksLikeDateSuffix(suffix)) return;
-
-        alias_buffer.clearRetainingCapacity();
-        try alias_buffer.print(self.temp_allocator, "{s}-{s}", .{ name[0..at_idx], suffix });
-
-        try self.putPricing(alias_buffer.items, entry);
-    }
-
-    fn looksLikeDateSuffix(suffix: []const u8) bool {
-        if (suffix.len != 8) return false;
-        for (suffix) |ch| {
-            if (!std.ascii.isDigit(ch)) return false;
-        }
-        return true;
-    }
-
-    fn putPricing(self: *PricingFeedParser, key: []const u8, entry: Model.ModelPricing) !void {
-        if (self.pricing.get(key) != null) return;
+    fn putPricing(self: *PricingFeedParser, key: []const u8, entry: Model.ModelPricing) AliasError!bool {
+        if (self.pricing.get(key) != null) return false;
         const copied_name = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(copied_name);
         try self.pricing.put(copied_name, entry);
+        return true;
     }
 };
 
@@ -983,7 +952,7 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
             }
         }
 
-        test "pricing parser stores alias for slash-separated model names" {
+        test "pricing parser stores manifest entries" {
             const allocator = std.testing.allocator;
             var pricing = Model.PricingMap.init(allocator);
             defer Model.deinitPricingMap(&pricing, allocator);
@@ -1005,7 +974,6 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
             try parser.insertPricingEntries("gemini/gemini-flash-latest", pricing_entry, &alias_buffer);
 
             try std.testing.expect(pricing.get("gemini/gemini-flash-latest") != null);
-            try std.testing.expect(pricing.get("gemini-flash-latest") != null);
         }
 
         test "usage descriptors map and accumulate token fields" {
