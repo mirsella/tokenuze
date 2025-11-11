@@ -94,28 +94,9 @@ fn parseGeminiSessionFile(
     var previous_totals: ?RawUsage = null;
     var model_state = ModelState{};
 
-    const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
-        ctx.logWarning(file_path, "failed to open gemini session file", err);
-        return;
-    };
-    defer file.close();
-
-    var io_single = std.Io.Threaded.init_single_threaded;
-    defer io_single.deinit();
-    const io = io_single.io();
-
-    var reader_buffer: [64 * 1024]u8 = undefined;
-    var file_reader = file.readerStreaming(io, reader_buffer[0..]);
-    const stream_reader = &file_reader.interface;
-
-    var json_reader = std.json.Reader.init(allocator, stream_reader);
-    defer json_reader.deinit();
-
-    if ((try json_reader.next()) != .object_begin) return;
-
-    var state = GeminiParseState{
-        .allocator = allocator,
+    var handler = GeminiLineHandler{
         .ctx = ctx,
+        .allocator = allocator,
         .file_path = file_path,
         .session_label = &session_label,
         .session_label_overridden = &session_label_overridden,
@@ -125,11 +106,60 @@ fn parseGeminiSessionFile(
         .model_state = &model_state,
     };
 
-    provider.jsonWalkObject(allocator, &json_reader, &state, parseGeminiRootField) catch |err| {
-        ctx.logWarning(file_path, "failed to parse gemini session file", err);
-        return;
-    };
+    try provider.streamJsonLines(
+        allocator,
+        ctx,
+        file_path,
+        .{
+            .max_bytes = 128 * 1024 * 1024,
+            .mode = .document,
+            .trim_lines = false,
+            .skip_empty = false,
+            .open_error_message = "failed to open gemini session file",
+            .read_error_message = "error while reading gemini session stream",
+            .advance_error_message = "error while advancing gemini session stream",
+        },
+        &handler,
+        GeminiLineHandler.handle,
+    );
 }
+
+const GeminiLineHandler = struct {
+    ctx: *const provider.ParseContext,
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    session_label: *[]const u8,
+    session_label_overridden: *bool,
+    timezone_offset_minutes: i32,
+    events: *std.ArrayList(model.TokenUsageEvent),
+    previous_totals: *?RawUsage,
+    model_state: *ModelState,
+
+    fn handle(self: *GeminiLineHandler, line: []const u8, line_index: usize) !void {
+        provider.parseJsonLine(self.allocator, line, self, parseGeminiDocument) catch |err| {
+            std.log.warn(
+                "{s}: failed to parse gemini session file '{s}' line {d} ({s})",
+                .{ self.ctx.provider_name, self.file_path, line_index, @errorName(err) },
+            );
+        };
+    }
+
+    fn parseGeminiDocument(self: *GeminiLineHandler, allocator: std.mem.Allocator, reader: *std.json.Reader) !void {
+        var state = GeminiParseState{
+            .allocator = allocator,
+            .ctx = self.ctx,
+            .file_path = self.file_path,
+            .session_label = self.session_label,
+            .session_label_overridden = self.session_label_overridden,
+            .timezone_offset_minutes = self.timezone_offset_minutes,
+            .events = self.events,
+            .previous_totals = self.previous_totals,
+            .model_state = self.model_state,
+        };
+
+        try provider.jsonWalkObject(allocator, reader, &state, parseGeminiRootField);
+    }
+};
 
 fn parseGeminiRootField(
     state: *GeminiParseState,
@@ -162,36 +192,19 @@ fn parseGeminiMessagesArray(
     allocator: std.mem.Allocator,
     reader: *std.json.Reader,
 ) !void {
-    const peek = try reader.peekNextTokenType();
-    if (peek == .null) {
-        _ = try reader.next();
-        return;
-    }
-    if (peek != .array_begin) {
-        try reader.skipValue();
-        return;
-    }
+    try provider.jsonWalkArrayObjects(allocator, reader, state, parseGeminiMessageObject);
+}
 
-    _ = try reader.next();
-
-    while (true) {
-        switch (try reader.peekNextTokenType()) {
-            .array_end => {
-                _ = try reader.next();
-                return;
-            },
-            .object_begin => {
-                _ = try reader.next();
-                var message = GeminiMessage{};
-                defer message.deinit(allocator);
-                try provider.jsonWalkObject(allocator, reader, &message, parseGeminiMessageField);
-                try emitGeminiMessage(state, &message);
-            },
-            else => {
-                try reader.skipValue();
-            },
-        }
-    }
+fn parseGeminiMessageObject(
+    state: *GeminiParseState,
+    allocator: std.mem.Allocator,
+    reader: *std.json.Reader,
+    _: usize,
+) !void {
+    var message = GeminiMessage{};
+    defer message.deinit(allocator);
+    try provider.jsonWalkObject(allocator, reader, &message, parseGeminiMessageField);
+    try emitGeminiMessage(state, &message);
 }
 
 fn parseGeminiMessageField(
@@ -201,11 +214,11 @@ fn parseGeminiMessageField(
     key: []const u8,
 ) !void {
     if (std.mem.eql(u8, key, "timestamp")) {
-        try provider.replaceJsonTokenOwned(&message.timestamp, allocator, try provider.jsonReadStringToken(allocator, reader));
+        try provider.replaceJsonToken(&message.timestamp, allocator, try provider.jsonReadStringToken(allocator, reader));
         return;
     }
     if (std.mem.eql(u8, key, "model")) {
-        try provider.replaceJsonTokenOwned(&message.model, allocator, try provider.jsonReadStringToken(allocator, reader));
+        try provider.replaceJsonToken(&message.model, allocator, try provider.jsonReadStringToken(allocator, reader));
         return;
     }
     if (std.mem.eql(u8, key, "tokens")) {
