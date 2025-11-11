@@ -143,6 +143,10 @@ pub fn formatTimezoneLabelAlloc(allocator: std.mem.Allocator, offset_minutes: i3
     return allocator.dupe(u8, label);
 }
 
+pub fn nsToMs(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
+}
+
 test "isoDateForTimezone adjusts across day boundaries" {
     const positive = try isoDateForTimezone("2025-09-01T16:30:00Z", 9 * 60);
     try std.testing.expectEqualStrings("2025-09-02", positive[0..]);

@@ -279,9 +279,7 @@ fn progressHandle(node: std.Progress.Node) ?std.Progress.Node {
     return if (node.index == .none) null else node;
 }
 
-fn nsToMs(ns: u64) f64 {
-    return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
-}
+const nsToMs = timeutil.nsToMs;
 
 fn flushOutput(writer: anytype) !void {
     writer.flush() catch |err| switch (err) {

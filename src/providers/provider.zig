@@ -426,9 +426,7 @@ pub fn loadRemotePricing(
     return stats;
 }
 
-fn nsToMs(ns: u64) f64 {
-    return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
-}
+const nsToMs = timeutil.nsToMs;
 
 fn fetchRemotePricing(
     shared_allocator: std.mem.Allocator,
