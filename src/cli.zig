@@ -16,7 +16,7 @@ pub const CliOptions = struct {
     providers: tokenuze.ProviderSelection = tokenuze.ProviderSelection.initAll(),
     upload: bool = false,
     output_explicit: bool = false,
-    log_level: std.log.Level = .info,
+    log_level: std.log.Level = if (builtin.mode == .Debug) .debug else .err,
 };
 
 const OptionId = enum {

@@ -32,7 +32,7 @@ pub const std_options: std.Options = .{
     .logFn = logFn,
 };
 
-var runtime_log_level = std.atomic.Value(u8).init(@intFromEnum(std.log.Level.info));
+var runtime_log_level: std.atomic.Value(u8) = .init(@intFromEnum(if (builtin.mode == .Debug) std.log.Level.debug else std.log.Level.err));
 
 pub fn setLogLevel(level: std.log.Level) void {
     runtime_log_level.store(@intFromEnum(level), .release);
