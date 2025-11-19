@@ -12,8 +12,15 @@ const GEMINI_USAGE_FIELDS = [_]provider.UsageFieldDescriptor{
     .{ .key = "output", .field = .output_tokens },
     .{ .key = "tool", .field = .output_tokens, .mode = .add },
     .{ .key = "thoughts", .field = .reasoning_output_tokens },
-    .{ .key = "total", .field = .total_tokens },
 };
+
+fn recomputeGeminiTotal(usage: *RawUsage) void {
+    var total = usage.input_tokens +| usage.cache_creation_input_tokens;
+    total = total +| usage.cached_input_tokens;
+    total = total +| usage.output_tokens;
+    total = total +| usage.reasoning_output_tokens;
+    usage.total_tokens = total;
+}
 
 const fallback_pricing = [_]provider.FallbackPricingEntry{
     .{ .name = "gemini-2.5-pro", .pricing = .{
@@ -223,6 +230,9 @@ fn parseGeminiMessageField(
     }
     if (std.mem.eql(u8, key, "tokens")) {
         message.usage = try provider.jsonParseUsageObjectWithDescriptors(allocator, reader, GEMINI_USAGE_FIELDS[0..]);
+        if (message.usage) |*usage| {
+            recomputeGeminiTotal(usage);
+        }
         return;
     }
 
@@ -300,5 +310,6 @@ test "gemini parser converts message totals into usage deltas" {
     try std.testing.expectEqual(@as(u64, 500), event.usage.cached_input_tokens);
     try std.testing.expectEqual(@as(u64, 125), event.usage.output_tokens);
     try std.testing.expectEqual(@as(u64, 20), event.usage.reasoning_output_tokens);
+    try std.testing.expectEqual(@as(u64, 4645), event.usage.total_tokens);
     try std.testing.expectEqual(@as(u64, 4000), event.display_input_tokens);
 }
