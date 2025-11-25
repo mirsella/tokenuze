@@ -5,7 +5,6 @@ const provider = @import("provider.zig");
 const RawUsage = model.RawTokenUsage;
 const MessageDeduper = provider.MessageDeduper;
 const ModelState = provider.ModelState;
-const TokenSlice = provider.JsonTokenSlice;
 
 const CLAUDE_USAGE_FIELDS = [_]provider.UsageFieldDescriptor{
     .{ .key = "input_tokens", .field = .input_tokens },
@@ -94,7 +93,7 @@ const EventBuilder = struct {
             .is_fallback = resolved_model.is_fallback,
             .display_input_tokens = self.handler.ctx.computeDisplayInput(usage),
         };
-        try self.handler.events.append(self.handler.allocator, event);
+        try self.handler.sink.emit(event);
         self.timestamp = null;
     }
 };
@@ -106,7 +105,7 @@ fn parseClaudeSessionFile(
     file_path: []const u8,
     deduper: ?*MessageDeduper,
     timezone_offset_minutes: i32,
-    events: *std.ArrayList(model.TokenUsageEvent),
+    sink: provider.EventSink,
 ) !void {
     var session_label = session_id;
     var session_label_overridden = false;
@@ -120,7 +119,7 @@ fn parseClaudeSessionFile(
         .session_label = &session_label,
         .session_label_overridden = &session_label_overridden,
         .timezone_offset_minutes = timezone_offset_minutes,
-        .events = events,
+        .sink = sink,
         .model_state = &model_state,
     };
 
@@ -147,7 +146,7 @@ const LineHandler = struct {
     session_label: *[]const u8,
     session_label_overridden: *bool,
     timezone_offset_minutes: i32,
-    events: *std.ArrayList(model.TokenUsageEvent),
+    sink: provider.EventSink,
     model_state: *ModelState,
 
     fn handle(self: *LineHandler, line: []const u8, line_index: usize) !void {
@@ -292,6 +291,8 @@ test "claude parser emits assistant usage events and respects overrides" {
 
     var events: std.ArrayList(model.TokenUsageEvent) = .empty;
     defer events.deinit(worker_allocator);
+    var sink_adapter = provider.EventListCollector.init(&events, worker_allocator);
+    const sink = sink_adapter.asSink();
 
     var deduper = try MessageDeduper.init(worker_allocator);
     defer deduper.deinit();
@@ -309,7 +310,7 @@ test "claude parser emits assistant usage events and respects overrides" {
         "fixtures/claude/basic.jsonl",
         &deduper,
         0,
-        &events,
+        sink,
     );
 
     try std.testing.expectEqual(@as(usize, 1), events.items.len);

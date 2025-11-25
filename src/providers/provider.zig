@@ -347,6 +347,33 @@ fn streamJsonDocumentInternal(
     try handler(handler_context, line_slice, 1);
 }
 
+pub const EventSink = struct {
+    context: *anyopaque,
+    emitFn: *const fn (*anyopaque, model.TokenUsageEvent) anyerror!void,
+
+    pub fn emit(self: EventSink, event: model.TokenUsageEvent) !void {
+        try self.emitFn(self.context, event);
+    }
+};
+
+pub const EventListCollector = struct {
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(model.TokenUsageEvent),
+
+    pub fn init(list: *std.ArrayList(model.TokenUsageEvent), allocator: std.mem.Allocator) EventListCollector {
+        return .{ .allocator = allocator, .list = list };
+    }
+
+    pub fn asSink(self: *EventListCollector) EventSink {
+        return .{ .context = self, .emitFn = EventListCollector.emit };
+    }
+
+    fn emit(ctx_ptr: *anyopaque, event: model.TokenUsageEvent) anyerror!void {
+        const self: *EventListCollector = @ptrCast(@alignCast(ctx_ptr));
+        try self.list.append(self.allocator, event);
+    }
+};
+
 pub const ParseSessionFn = *const fn (
     allocator: std.mem.Allocator,
     ctx: *const ParseContext,
@@ -354,7 +381,7 @@ pub const ParseSessionFn = *const fn (
     file_path: []const u8,
     deduper: ?*MessageDeduper,
     timezone_offset_minutes: i32,
-    events: *std.ArrayList(model.TokenUsageEvent),
+    sink: EventSink,
 ) anyerror!void;
 
 pub const ProviderConfig = struct {
@@ -455,9 +482,6 @@ const PricingFeedParser = struct {
     const AliasError = error{OutOfMemory};
 
     pub fn parse(self: *PricingFeedParser, reader: *std.json.Reader) !void {
-        var alias_buffer: std.ArrayList(u8) = .empty;
-        defer alias_buffer.deinit(self.temp_allocator);
-
         if ((try reader.next()) != .object_begin) return error.InvalidResponse;
 
         while (true) {
@@ -474,7 +498,7 @@ const PricingFeedParser = struct {
                     defer name.deinit(self.temp_allocator);
                     const maybe_pricing = try self.parseEntry(self.temp_allocator, reader);
                     if (maybe_pricing) |entry| {
-                        try self.insertPricingEntries(name.view(), entry, &alias_buffer);
+                        try self.insertPricingEntries(name.view(), entry);
                     }
                 },
                 else => return error.InvalidResponse,
@@ -538,9 +562,7 @@ const PricingFeedParser = struct {
         self: *PricingFeedParser,
         name: []const u8,
         entry: model.ModelPricing,
-        alias_buffer: *std.ArrayList(u8),
     ) AliasError!void {
-        _ = alias_buffer;
         _ = try self.putPricing(name, entry);
     }
 
@@ -921,18 +943,17 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
         pub const EventConsumer = struct {
             context: *anyopaque,
             mutex: ?*std.Thread.Mutex = null,
-            ingest: *const fn (*anyopaque, std.mem.Allocator, *model.TokenUsageEvent, model.DateFilters) anyerror!void,
+            ingest: *const fn (*anyopaque, std.mem.Allocator, *const model.TokenUsageEvent, model.DateFilters) anyerror!void,
         };
 
-        const PARSE_CONTEXT = ParseContext{
+        const parse_context = ParseContext{
             .provider_name = provider_name,
             .legacy_fallback_model = legacy_fallback_model,
             .cached_counts_overlap_input = cfg.cached_counts_overlap_input,
         };
-        const PARSE_FN = cfg.parse_session_fn;
-        const JSON_EXT = cfg.session_file_ext;
-        const FALLBACK_PRICING = fallback_pricing;
-        const REQUIRES_DEDUPER = cfg.requires_deduper;
+        const parse_fn = cfg.parse_session_fn;
+        const json_ext = cfg.session_file_ext;
+        const requires_deduper = cfg.requires_deduper;
 
         const SummaryConsumer = struct {
             builder: *model.SummaryBuilder,
@@ -941,10 +962,10 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
         fn summaryIngest(
             ctx_ptr: *anyopaque,
             allocator: std.mem.Allocator,
-            event: *model.TokenUsageEvent,
+            event: *const model.TokenUsageEvent,
             filters: model.DateFilters,
         ) anyerror!void {
-            const ctx = @as(*SummaryConsumer, @ptrCast(@alignCast(ctx_ptr)));
+            const ctx: *SummaryConsumer = @ptrCast(@alignCast(ctx_ptr));
             try ctx.builder.ingest(allocator, event, filters);
         }
 
@@ -953,11 +974,9 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
             temp_allocator: std.mem.Allocator,
             summaries: *model.SummaryBuilder,
             filters: model.DateFilters,
-            _pricing: *model.PricingMap,
             progress: ?std.Progress.Node,
         ) !void {
             var total_timer = try std.time.Timer.start();
-            _ = _pricing;
 
             if (progress) |node| std.Progress.Node.setEstimatedTotalItems(node, 1);
 
@@ -999,11 +1018,13 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
 
         pub fn loadPricingData(
             shared_allocator: std.mem.Allocator,
-            temp_allocator: std.mem.Allocator,
             pricing: *model.PricingMap,
         ) !void {
-            _ = temp_allocator;
-            try ensureFallbackPricing(shared_allocator, pricing);
+            for (fallback_pricing) |fallback| {
+                if (pricing.get(fallback.name) != null) continue;
+                const key = try shared_allocator.dupe(u8, fallback.name);
+                try pricing.put(key, fallback.pricing);
+            }
         }
 
         fn logSessionWarning(file_path: []const u8, message: []const u8, err: anyerror) void {
@@ -1046,8 +1067,22 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
                     const worker_allocator = worker_arena_state.allocator();
 
                     const timezone_offset = @as(i32, shared.filters.timezone_offset_minutes);
-                    var local_events: std.ArrayList(model.TokenUsageEvent) = .empty;
-                    defer local_events.deinit(worker_allocator);
+                    const sink = EventSink{
+                        .context = shared,
+                        .emitFn = struct {
+                            fn emit(ctx_ptr: *anyopaque, event: model.TokenUsageEvent) anyerror!void {
+                                const ctx: *SharedContext = @ptrCast(@alignCast(ctx_ptr));
+                                if (ctx.consumer.mutex) |mutex| mutex.lock();
+                                defer if (ctx.consumer.mutex) |mutex| mutex.unlock();
+                                try ctx.consumer.ingest(
+                                    ctx.consumer.context,
+                                    ctx.shared_allocator,
+                                    &event,
+                                    ctx.filters,
+                                );
+                            }
+                        }.emit,
+                    };
 
                     const relative = shared.paths[args.index];
                     const absolute_path = std.fs.path.join(worker_allocator, &.{ shared.sessions_dir, relative }) catch |err| {
@@ -1060,8 +1095,8 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
                     };
                     defer worker_allocator.free(absolute_path);
 
-                    if (relative.len <= JSON_EXT.len or !std.mem.endsWith(u8, relative, JSON_EXT)) return;
-                    const session_id_slice = relative[0 .. relative.len - JSON_EXT.len];
+                    if (relative.len <= json_ext.len or !std.mem.endsWith(u8, relative, json_ext)) return;
+                    const session_id_slice = relative[0 .. relative.len - json_ext.len];
 
                     const maybe_session_id = duplicateNonEmpty(worker_allocator, session_id_slice) catch {
                         return;
@@ -1074,21 +1109,11 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
                         absolute_path,
                         shared.deduper,
                         timezone_offset,
-                        &local_events,
+                        sink,
                     ) catch |err| {
                         logSessionWarning(absolute_path, "failed to parse session file", err);
                         return;
                     };
-
-                    if (local_events.items.len == 0) return;
-
-                    if (shared.consumer.mutex) |mutex| mutex.lock();
-                    defer if (shared.consumer.mutex) |mutex| mutex.unlock();
-                    for (local_events.items) |*event| {
-                        shared.consumer.ingest(shared.consumer.context, shared.shared_allocator, event, shared.filters) catch {
-                            return;
-                        };
-                    }
                 }
             };
 
@@ -1121,7 +1146,7 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
             while (try walker.next()) |entry| {
                 if (entry.kind != .file) continue;
                 const relative_path = std.mem.sliceTo(entry.path, 0);
-                if (!std.mem.endsWith(u8, relative_path, JSON_EXT)) continue;
+                if (!std.mem.endsWith(u8, relative_path, json_ext)) continue;
                 const copy = try shared_allocator.dupe(u8, relative_path);
                 try relative_paths.append(shared_allocator, copy);
             }
@@ -1143,7 +1168,7 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
 
             var deduper_storage: ?MessageDeduper = null;
             defer if (deduper_storage) |*ded| ded.deinit();
-            if (REQUIRES_DEDUPER) {
+            if (requires_deduper) {
                 deduper_storage = try MessageDeduper.init(temp_allocator);
             }
 
@@ -1190,26 +1215,15 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
             file_path: []const u8,
             deduper: ?*MessageDeduper,
             timezone_offset_minutes: i32,
-            events: *std.ArrayList(model.TokenUsageEvent),
+            sink: EventSink,
         ) !void {
-            try PARSE_FN(allocator, &PARSE_CONTEXT, session_id, file_path, deduper, timezone_offset_minutes, events);
-        }
-
-        fn ensureFallbackPricing(shared_allocator: std.mem.Allocator, pricing: *model.PricingMap) !void {
-            for (FALLBACK_PRICING) |fallback| {
-                if (pricing.get(fallback.name) != null) continue;
-                const key = try shared_allocator.dupe(u8, fallback.name);
-                try pricing.put(key, fallback.pricing);
-            }
+            try parse_fn(allocator, &parse_context, session_id, file_path, deduper, timezone_offset_minutes, sink);
         }
 
         test "pricing parser stores manifest entries" {
             const allocator = std.testing.allocator;
             var pricing = model.PricingMap.init(allocator);
             defer model.deinitPricingMap(&pricing, allocator);
-            var alias_buffer: std.ArrayList(u8) = .empty;
-            defer alias_buffer.deinit(allocator);
-
             var parser = PricingFeedParser{
                 .allocator = allocator,
                 .temp_allocator = allocator,
@@ -1222,7 +1236,7 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
                 .cached_input_cost_per_m = 1,
                 .output_cost_per_m = 1,
             };
-            try parser.insertPricingEntries("gemini/gemini-flash-latest", pricing_entry, &alias_buffer);
+            try parser.insertPricingEntries("gemini/gemini-flash-latest", pricing_entry);
 
             try std.testing.expect(pricing.get("gemini/gemini-flash-latest") != null);
         }
