@@ -28,7 +28,7 @@ const ProviderExports = provider.makeProvider(.{
     .legacy_fallback_model = "gpt-5",
     .fallback_pricing = fallback_pricing[0..],
     .cached_counts_overlap_input = true,
-    .parse_session_fn = parseCodexSessionFile,
+    .parse_session_fn = parseSessionFile,
 });
 
 pub const collect = ProviderExports.collect;
@@ -55,7 +55,7 @@ const ObjectFieldContext = struct {
     is_event_msg: *bool,
 };
 
-fn parseCodexSessionFile(
+fn parseSessionFile(
     allocator: std.mem.Allocator,
     ctx: *const provider.ParseContext,
     session_id: []const u8,
@@ -68,7 +68,7 @@ fn parseCodexSessionFile(
     var previous_totals: ?RawUsage = null;
     var model_state = ModelState{};
 
-    var handler = CodexLineHandler{
+    var handler = LineHandler{
         .ctx = ctx,
         .allocator = allocator,
         .file_path = file_path,
@@ -90,11 +90,11 @@ fn parseCodexSessionFile(
             .advance_error_message = "error while advancing session stream",
         },
         &handler,
-        CodexLineHandler.handle,
+        LineHandler.handle,
     );
 }
 
-const CodexLineHandler = struct {
+const LineHandler = struct {
     ctx: *const provider.ParseContext,
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -104,7 +104,7 @@ const CodexLineHandler = struct {
     model_state: *ModelState,
     timezone_offset_minutes: i32,
 
-    fn handle(self: *CodexLineHandler, line: []const u8, line_index: usize) !void {
+    fn handle(self: *LineHandler, line: []const u8, line_index: usize) !void {
         provider.parseJsonLine(self.allocator, line, self, processSessionLine) catch |err| {
             std.log.warn(
                 "{s}: failed to parse codex session file '{s}' line {d} ({s})",
@@ -113,7 +113,7 @@ const CodexLineHandler = struct {
         };
     }
 
-    fn processSessionLine(self: *CodexLineHandler, allocator: std.mem.Allocator, reader: *std.json.Reader) !void {
+    fn processSessionLine(self: *LineHandler, allocator: std.mem.Allocator, reader: *std.json.Reader) !void {
         var payload_result = PayloadResult{};
         defer payload_result.deinit(allocator);
         var timestamp_token: ?TokenSlice = null;
@@ -347,7 +347,7 @@ test "codex parser emits usage events from token_count entries" {
         .cached_counts_overlap_input = true,
     };
 
-    try parseCodexSessionFile(
+    try parseSessionFile(
         worker_allocator,
         &ctx,
         "codex-fixture",

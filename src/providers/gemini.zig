@@ -13,7 +13,7 @@ const GEMINI_USAGE_FIELDS = [_]provider.UsageFieldDescriptor{
     .{ .key = "thoughts", .field = .reasoning_output_tokens },
 };
 
-fn recomputeGeminiTotal(usage: *RawUsage) void {
+fn recomputeTotal(usage: *RawUsage) void {
     var total = usage.input_tokens +| usage.cache_creation_input_tokens;
     total = total +| usage.cached_input_tokens;
     total = total +| usage.output_tokens;
@@ -55,13 +55,13 @@ const ProviderExports = provider.makeProvider(.{
     .fallback_pricing = fallback_pricing[0..],
     .session_file_ext = ".json",
     .cached_counts_overlap_input = false,
-    .parse_session_fn = parseGeminiSessionFile,
+    .parse_session_fn = parseSessionFile,
 });
 
 pub const collect = ProviderExports.collect;
 pub const loadPricingData = ProviderExports.loadPricingData;
 
-const GeminiParseState = struct {
+const ParseState = struct {
     allocator: std.mem.Allocator,
     ctx: *const provider.ParseContext,
     file_path: []const u8,
@@ -73,16 +73,16 @@ const GeminiParseState = struct {
     model_state: *ModelState,
 };
 
-const GeminiMessageContext = struct {
-    state: *GeminiParseState,
+const MessageContext = struct {
+    state: *ParseState,
     timestamp: ?provider.TimestampInfo = null,
     usage: ?RawUsage = null,
 
-    fn deinit(self: *GeminiMessageContext) void {
+    fn deinit(self: *MessageContext) void {
         self.clearTimestamp();
     }
 
-    fn clearTimestamp(self: *GeminiMessageContext) void {
+    fn clearTimestamp(self: *MessageContext) void {
         if (self.timestamp) |info| {
             self.state.allocator.free(info.text);
             self.timestamp = null;
@@ -90,7 +90,7 @@ const GeminiMessageContext = struct {
     }
 };
 
-fn parseGeminiSessionFile(
+fn parseSessionFile(
     allocator: std.mem.Allocator,
     ctx: *const provider.ParseContext,
     session_id: []const u8,
@@ -105,7 +105,7 @@ fn parseGeminiSessionFile(
     var previous_totals: ?RawUsage = null;
     var model_state = ModelState{};
 
-    var handler = GeminiLineHandler{
+    var handler = LineHandler{
         .ctx = ctx,
         .allocator = allocator,
         .file_path = file_path,
@@ -131,11 +131,11 @@ fn parseGeminiSessionFile(
             .advance_error_message = "error while advancing gemini session stream",
         },
         &handler,
-        GeminiLineHandler.handle,
+        LineHandler.handle,
     );
 }
 
-const GeminiLineHandler = struct {
+const LineHandler = struct {
     ctx: *const provider.ParseContext,
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -146,8 +146,8 @@ const GeminiLineHandler = struct {
     previous_totals: *?RawUsage,
     model_state: *ModelState,
 
-    fn handle(self: *GeminiLineHandler, line: []const u8, line_index: usize) !void {
-        provider.parseJsonLine(self.allocator, line, self, parseGeminiDocument) catch |err| {
+    fn handle(self: *LineHandler, line: []const u8, line_index: usize) !void {
+        provider.parseJsonLine(self.allocator, line, self, parseDocument) catch |err| {
             std.log.warn(
                 "{s}: failed to parse gemini session file '{s}' line {d} ({s})",
                 .{ self.ctx.provider_name, self.file_path, line_index, @errorName(err) },
@@ -155,8 +155,8 @@ const GeminiLineHandler = struct {
         };
     }
 
-    fn parseGeminiDocument(self: *GeminiLineHandler, allocator: std.mem.Allocator, reader: *std.json.Reader) !void {
-        var state = GeminiParseState{
+    fn parseDocument(self: *LineHandler, allocator: std.mem.Allocator, reader: *std.json.Reader) !void {
+        var state = ParseState{
             .allocator = allocator,
             .ctx = self.ctx,
             .file_path = self.file_path,
@@ -168,12 +168,12 @@ const GeminiLineHandler = struct {
             .model_state = self.model_state,
         };
 
-        try provider.jsonWalkObject(allocator, reader, &state, parseGeminiRootField);
+        try provider.jsonWalkObject(allocator, reader, &state, parseRootField);
     }
 };
 
-fn parseGeminiRootField(
-    state: *GeminiParseState,
+fn parseRootField(
+    state: *ParseState,
     allocator: std.mem.Allocator,
     reader: *std.json.Reader,
     key: []const u8,
@@ -191,35 +191,35 @@ fn parseGeminiRootField(
     }
 
     if (std.mem.eql(u8, key, "messages")) {
-        try parseGeminiMessagesArray(state, allocator, reader);
+        try parseMessagesArray(state, allocator, reader);
         return;
     }
 
     try reader.skipValue();
 }
 
-fn parseGeminiMessagesArray(
-    state: *GeminiParseState,
+fn parseMessagesArray(
+    state: *ParseState,
     allocator: std.mem.Allocator,
     reader: *std.json.Reader,
 ) !void {
-    try provider.jsonWalkArrayObjects(allocator, reader, state, parseGeminiMessageObject);
+    try provider.jsonWalkArrayObjects(allocator, reader, state, parseMessageObject);
 }
 
-fn parseGeminiMessageObject(
-    state: *GeminiParseState,
+fn parseMessageObject(
+    state: *ParseState,
     allocator: std.mem.Allocator,
     reader: *std.json.Reader,
     _: usize,
 ) !void {
-    var context = GeminiMessageContext{ .state = state };
+    var context = MessageContext{ .state = state };
     defer context.deinit();
-    try provider.jsonWalkObject(allocator, reader, &context, parseGeminiMessageField);
-    try emitGeminiMessage(&context);
+    try provider.jsonWalkObject(allocator, reader, &context, parseMessageField);
+    try emitMessage(&context);
 }
 
-fn parseGeminiMessageField(
-    context: *GeminiMessageContext,
+fn parseMessageField(
+    context: *MessageContext,
     allocator: std.mem.Allocator,
     reader: *std.json.Reader,
     key: []const u8,
@@ -248,7 +248,7 @@ fn parseGeminiMessageField(
     if (std.mem.eql(u8, key, "tokens")) {
         context.usage = try provider.jsonParseUsageObjectWithDescriptors(allocator, reader, GEMINI_USAGE_FIELDS[0..]);
         if (context.usage) |*usage| {
-            recomputeGeminiTotal(usage);
+            recomputeTotal(usage);
         }
         return;
     }
@@ -256,7 +256,7 @@ fn parseGeminiMessageField(
     try reader.skipValue();
 }
 
-fn emitGeminiMessage(context: *GeminiMessageContext) !void {
+fn emitMessage(context: *MessageContext) !void {
     const usage_raw = context.usage orelse return;
 
     var delta = model.TokenUsage.deltaFrom(usage_raw, context.state.previous_totals.*);
@@ -301,7 +301,7 @@ test "gemini parser converts message totals into usage deltas" {
         .cached_counts_overlap_input = false,
     };
 
-    try parseGeminiSessionFile(
+    try parseSessionFile(
         worker_allocator,
         &ctx,
         "gemini-fixture",
