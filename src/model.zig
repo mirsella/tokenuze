@@ -183,7 +183,7 @@ pub fn usageFieldForKey(key: []const u8) ?UsageField {
 
 pub fn parseTokenNumber(slice: []const u8) u64 {
     if (slice.len == 0) return 0;
-    if (std.mem.indexOfScalar(u8, slice, '.')) |_| {
+    if (std.mem.findScalar(u8, slice, '.')) |_| {
         const parsed = std.fmt.parseFloat(f64, slice) catch return 0;
         return if (parsed >= 0)
             @as(u64, @intFromFloat(std.math.floor(parsed)))
@@ -234,8 +234,8 @@ test "writeUsageJsonFields omits cache fields when hidden" {
     try stringify.beginObject();
     try writeUsageJsonFields(&stringify, usage, null, .{ .cache_creation = false, .cache_read = false });
     try stringify.endObject();
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "cacheCreationInputTokens") == null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "cachedInputTokens") == null);
+    try std.testing.expect(std.mem.find(u8, buffer.items, "cacheCreationInputTokens") == null);
+    try std.testing.expect(std.mem.find(u8, buffer.items, "cachedInputTokens") == null);
 }
 
 pub const TokenUsageEvent = struct {
@@ -841,7 +841,7 @@ fn createDateVariant(
 ) !?[]u8 {
     var search_index: usize = 0;
     while (search_index < source.len) {
-        const pos = std.mem.indexOfScalarPos(u8, source, search_index, from) orelse return null;
+        const pos = std.mem.findScalarPos(u8, source, search_index, from) orelse return null;
         if (pos + 9 <= source.len and isEightDigitBlock(source[pos + 1 .. pos + 9])) {
             var copy = try allocator.dupe(u8, source);
             copy[pos] = to;
