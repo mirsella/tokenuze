@@ -467,7 +467,58 @@ pub const SessionRecorder = struct {
         return list;
     }
 
+    test "sortedSessions orders by last activity" {
+        const allocator = std.testing.allocator;
+        var recorder = SessionRecorder.init(allocator);
+        defer recorder.deinit(allocator);
+
+        var first = try recorder.sessions.getOrPut("alpha");
+        first.key_ptr.* = try allocator.dupe(u8, "alpha");
+        first.value_ptr.* = SessionEntry.init("alpha", "", "");
+        try first.value_ptr.updateLastActivity(allocator, "2025-01-01T00:00:00Z");
+
+        var second = try recorder.sessions.getOrPut("beta");
+        second.key_ptr.* = try allocator.dupe(u8, "beta");
+        second.value_ptr.* = SessionEntry.init("beta", "", "");
+        try second.value_ptr.updateLastActivity(allocator, "2025-01-02T00:00:00Z");
+
+        var third = try recorder.sessions.getOrPut("gamma");
+        third.key_ptr.* = try allocator.dupe(u8, "gamma");
+        third.value_ptr.* = SessionEntry.init("gamma", "", "");
+
+        var fourth = try recorder.sessions.getOrPut("delta");
+        fourth.key_ptr.* = try allocator.dupe(u8, "delta");
+        fourth.value_ptr.* = SessionEntry.init("delta", "", "");
+        try fourth.value_ptr.updateLastActivity(allocator, "2025-01-01T00:00:00Z");
+
+        var ordered = try recorder.sortedSessions(allocator);
+        defer ordered.deinit(allocator);
+
+        try std.testing.expectEqual(@as(usize, 4), ordered.items.len);
+        try std.testing.expectEqualStrings("beta", ordered.items[0].session_id);
+        try std.testing.expectEqualStrings("alpha", ordered.items[1].session_id);
+        try std.testing.expectEqualStrings("delta", ordered.items[2].session_id);
+        try std.testing.expectEqualStrings("gamma", ordered.items[3].session_id);
+    }
+
     fn sessionLessThan(_: void, lhs: *const SessionEntry, rhs: *const SessionEntry) bool {
+        const lhs_ts = lhs.last_activity;
+        const rhs_ts = rhs.last_activity;
+
+        const lhs_has_ts = lhs_ts != null;
+        const rhs_has_ts = rhs_ts != null;
+
+        // Sessions with activity come before those without.
+        if (lhs_has_ts and !rhs_has_ts) return true;
+        if (!lhs_has_ts and rhs_has_ts) return false;
+
+        if (lhs_has_ts and rhs_has_ts) {
+            if (!std.mem.eql(u8, lhs_ts.?, rhs_ts.?)) {
+                return std.mem.lessThan(u8, lhs_ts.?, rhs_ts.?);
+            }
+        }
+
+        // Fallback to sorting by session_id if timestamps are same or both are null.
         return std.mem.lessThan(u8, lhs.session_id, rhs.session_id);
     }
 
