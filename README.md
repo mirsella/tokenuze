@@ -5,7 +5,7 @@ It scans session logs, aggregates token counts, and reports pricing.
 The output is a table or JSON, suitable for dashboards.
 
 ## Requirements
-- Zig 0.16.0-dev.1456+16fc083f2 or newer (if building from source)
+- Zig 0.16.0-dev.1484+d0ba6642b or newer (if building from source)
 - `sqlite3` in your `PATH` (for Zed and Crush providers)
 - Network access to fetch remote pricing / uploading stats (optional)
 
