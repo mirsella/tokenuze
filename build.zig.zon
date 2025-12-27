@@ -2,7 +2,7 @@
     .name = .tokenuze,
     .version = "0.8.0-dev",
     .fingerprint = 0x62ec558b78b7381f,
-    .minimum_zig_version = "0.16.0-dev.1634+b27bdd5af",
+    .minimum_zig_version = "0.16.0-dev.1657+985a3565c",
     .dependencies = .{},
     .paths = .{
         "build.zig",
