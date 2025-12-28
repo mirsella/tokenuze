@@ -221,14 +221,14 @@ pub fn findProviderIndex(name: []const u8) ?usize {
     return null;
 }
 
-pub fn run(allocator: std.mem.Allocator, filters: DateFilters, selection: ProviderSelection) !void {
-    const enable_progress = std.fs.File.stdout().isTty();
+pub fn run(io: std.Io, allocator: std.mem.Allocator, filters: DateFilters, selection: ProviderSelection) !void {
+    const enable_progress = std.Io.File.stdout().isTty(io) catch false;
     logRunStart(filters, selection, enable_progress);
-    var summary = try collectSummary(allocator, filters, selection, enable_progress);
+    var summary = try collectSummary(io, allocator, filters, selection, enable_progress);
     defer summary.deinit(allocator);
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, stdout_buffer[0..]);
     const out_writer = &stdout_writer.interface;
     switch (filters.output_format) {
         .table => try render.Renderer.writeTable(out_writer, allocator, summary.builder.items(), &summary.totals),
@@ -238,7 +238,11 @@ pub fn run(allocator: std.mem.Allocator, filters: DateFilters, selection: Provid
 }
 
 pub fn renderSummaryAlloc(allocator: std.mem.Allocator, filters: DateFilters, selection: ProviderSelection) ![]u8 {
-    var summary = try collectSummaryInternal(allocator, filters, selection, false, null, null);
+    var io_single = std.Io.Threaded.init_single_threaded;
+    defer io_single.deinit();
+    const io = io_single.io();
+
+    var summary = try collectSummaryInternal(io, allocator, filters, selection, false, null, null);
     defer summary.deinit(allocator);
     return try renderSummaryBuffer(allocator, summary.builder.items(), &summary.totals, filters.pretty_output);
 }
@@ -284,7 +288,11 @@ pub fn collectSessionsWithCache(
     var recorder = model.SessionRecorder.init(allocator);
     errdefer recorder.deinit(allocator);
 
-    var summary = try collectSummaryInternal(allocator, filters, selection, false, &recorder, cache);
+    var io_single = std.Io.Threaded.init_single_threaded;
+    defer io_single.deinit();
+    const io = io_single.io();
+
+    var summary = try collectSummaryInternal(io, allocator, filters, selection, false, &recorder, cache);
     // Mirror the aggregated totals from the daily summary to keep --sessions output
     // in lockstep with the default summary, even if per-session pricing or
     // grouping would introduce tiny floating-point differences.
@@ -315,7 +323,11 @@ pub fn collectUploadReportWithCache(
     var recorder = model.SessionRecorder.init(allocator);
     defer recorder.deinit(allocator);
 
-    var summary = try collectSummaryInternal(allocator, filters, selection, false, &recorder, cache);
+    var io_single = std.Io.Threaded.init_single_threaded;
+    defer io_single.deinit();
+    const io = io_single.io();
+
+    var summary = try collectSummaryInternal(io, allocator, filters, selection, false, &recorder, cache);
     defer summary.deinit(allocator);
 
     const daily_json = try renderSummaryBuffer(allocator, summary.builder.items(), &summary.totals, filters.pretty_output);
@@ -441,15 +453,17 @@ fn flushOutput(writer: anytype) !void {
 }
 
 fn collectSummary(
+    io: std.Io,
     allocator: std.mem.Allocator,
     filters: DateFilters,
     selection: ProviderSelection,
     enable_progress: bool,
 ) !SummaryResult {
-    return collectSummaryInternal(allocator, filters, selection, enable_progress, null, null);
+    return collectSummaryInternal(io, allocator, filters, selection, enable_progress, null, null);
 }
 
 fn collectSummaryInternal(
+    io: std.Io,
     allocator: std.mem.Allocator,
     filters: DateFilters,
     selection: ProviderSelection,
@@ -468,7 +482,7 @@ fn collectSummaryInternal(
 
     var progress_root: std.Progress.Node = undefined;
     const progress_parent = if (enable_progress) blk: {
-        progress_root = std.Progress.start(.{ .root_name = "Tokenuze" });
+        progress_root = std.Progress.start(io, .{ .root_name = "Tokenuze" });
         break :blk &progress_root;
     } else null;
     defer if (enable_progress) std.Progress.Node.end(progress_root);

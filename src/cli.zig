@@ -140,9 +140,9 @@ fn parseOptionsIterator(args: anytype) CliError!CliOptions {
     return options;
 }
 
-pub fn printHelp() !void {
+pub fn printHelp(io: std.Io) !void {
     var buffer: [1024]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&buffer);
+    var stdout = std.Io.File.stdout().writer(io, buffer[0..]);
     const writer = &stdout.interface;
     try writer.print(
         \\Tokenuze aggregates model usage logs into daily summaries.
@@ -177,9 +177,9 @@ pub fn printHelp() !void {
     try writer.flush();
 }
 
-pub fn printVersion(version: []const u8) !void {
+pub fn printVersion(io: std.Io, version: []const u8) !void {
     var buffer: [256]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&buffer);
+    var stdout = std.Io.File.stdout().writer(io, buffer[0..]);
     const writer = &stdout.interface;
     try writer.print("{s}\n", .{version});
     writer.flush() catch |err| switch (err) {
@@ -188,7 +188,7 @@ pub fn printVersion(version: []const u8) !void {
     };
 }
 
-pub fn printAgentList(allocator: std.mem.Allocator) !void {
+pub fn printAgentList(io: std.Io, allocator: std.mem.Allocator) !void {
     var infos = try tokenuze.providerPathInfos(allocator);
     defer {
         for (infos.items) |info| allocator.free(info.path);
@@ -196,7 +196,7 @@ pub fn printAgentList(allocator: std.mem.Allocator) !void {
     }
 
     var buffer: [1024]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&buffer);
+    var stdout = std.Io.File.stdout().writer(io, buffer[0..]);
     const writer = &stdout.interface;
     try writer.print("Supported agents:\n", .{});
     for (infos.items) |info| {
