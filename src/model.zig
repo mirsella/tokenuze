@@ -273,6 +273,8 @@ const pricing_candidate_prefixes = [_][]const u8{
 const pricing_aliases = [_]struct { alias: []const u8, target: []const u8 }{
     // Gemini names as displayed in Zed
     .{ .alias = "gemini 3 pro", .target = "gemini-3-pro" },
+    .{ .alias = "gemini 3 flash", .target = "gemini-3-flash" },
+    .{ .alias = "gemini 3 flash preview", .target = "gemini-3-flash-preview" },
     .{ .alias = "gemini 2.5 pro", .target = "gemini-2.5-pro" },
     .{ .alias = "gemini 2.5 flash", .target = "gemini-2.5-flash" },
     .{ .alias = "gemini 2.5 flash-lite", .target = "gemini-2.5-flash-lite" },
@@ -1233,6 +1235,24 @@ test "resolveModelPricing handles hyphen and basename variants" {
     const hyphen_rate = resolveModelPricing(allocator, &map, "My Test Model") orelse unreachable;
     try std.testing.expectEqual(@as(f64, 7), hyphen_rate.output_cost_per_m);
     try std.testing.expect(map.get("My Test Model") != null);
+}
+
+test "resolveModelPricing resolves Gemini display aliases" {
+    const allocator = std.testing.allocator;
+    var map = PricingMap.init(allocator);
+    defer deinitPricingMap(&map, allocator);
+
+    const key = try allocator.dupe(u8, "gemini-3-flash");
+    try map.put(key, .{
+        .input_cost_per_m = 0.3,
+        .cache_creation_cost_per_m = 0.3,
+        .cached_input_cost_per_m = 0.075,
+        .output_cost_per_m = 2.5,
+    });
+
+    const rate = resolveModelPricing(allocator, &map, "Gemini 3 Flash") orelse unreachable;
+    try std.testing.expectEqual(@as(f64, 0.3), rate.input_cost_per_m);
+    try std.testing.expect(map.get("Gemini 3 Flash") != null);
 }
 
 test "TokenUsage.cost correctly handles already normalized overlapping tokens" {

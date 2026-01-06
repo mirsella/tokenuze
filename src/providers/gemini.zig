@@ -12,6 +12,20 @@ const fallback_pricing = [_]provider.FallbackPricingEntry{
         .cached_input_cost_per_m = 0.125,
         .output_cost_per_m = 10.0,
     } },
+    // Used by some log sources (e.g. Zed) and not always present in the remote pricing dataset.
+    // Keep aligned with the "flash" fallback pricing unless/until a more specific entry is available.
+    .{ .name = "gemini-3-flash", .pricing = .{
+        .input_cost_per_m = 0.30,
+        .cache_creation_cost_per_m = 0.30,
+        .cached_input_cost_per_m = 0.075,
+        .output_cost_per_m = 2.50,
+    } },
+    .{ .name = "gemini-3-flash-preview", .pricing = .{
+        .input_cost_per_m = 0.30,
+        .cache_creation_cost_per_m = 0.30,
+        .cached_input_cost_per_m = 0.075,
+        .output_cost_per_m = 2.50,
+    } },
     .{ .name = "gemini-flash-latest", .pricing = .{
         .input_cost_per_m = 0.30,
         .cache_creation_cost_per_m = 0.30,
@@ -31,6 +45,15 @@ const fallback_pricing = [_]provider.FallbackPricingEntry{
         .output_cost_per_m = 1.05,
     } },
 };
+
+test "gemini.loadPricingData provides gemini-3-flash-preview fallback" {
+    const allocator = std.testing.allocator;
+    var pricing = model.PricingMap.init(allocator);
+    defer model.deinitPricingMap(&pricing, allocator);
+
+    try loadPricingData(allocator, &pricing);
+    try std.testing.expect(pricing.get("gemini-3-flash-preview") != null);
+}
 
 const ProviderExports = provider.makeProvider(.{
     .name = "gemini",
