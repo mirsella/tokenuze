@@ -919,8 +919,8 @@ fn lookupBySubstring(
             return entry.value_ptr.*;
         }
 
-        const forward = std.ascii.indexOfIgnoreCase(key, lookup_name) != null;
-        const backward = std.ascii.indexOfIgnoreCase(lookup_name, key) != null;
+        const forward = std.ascii.findIgnoreCase(key, lookup_name) != null;
+        const backward = std.ascii.findIgnoreCase(lookup_name, key) != null;
         if (!forward and !backward) continue;
 
         const score = if (forward)

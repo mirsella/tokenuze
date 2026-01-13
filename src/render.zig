@@ -571,8 +571,8 @@ pub const Renderer = struct {
 
         try Renderer.writeSessionsTable(writer, allocator, &recorder, 0);
         const out = stream.getWritten();
-        try std.testing.expect(std.mem.indexOf(u8, out, "s1") != null);
-        try std.testing.expect(std.mem.indexOf(u8, out, "$1.23") != null);
+        try std.testing.expect(std.mem.find(u8, out, "s1") != null);
+        try std.testing.expect(std.mem.find(u8, out, "$1.23") != null);
     }
 
     test "writeSessionsTable formats last activity with timezone" {
@@ -593,7 +593,7 @@ pub const Renderer = struct {
 
         try Renderer.writeSessionsTable(writer, allocator, &recorder, -5 * 60);
         const out = stream.getWritten();
-        try std.testing.expect(std.mem.indexOf(u8, out, "2025-02-15 13:30:00 UTC-05:00") != null);
+        try std.testing.expect(std.mem.find(u8, out, "2025-02-15 13:30:00 UTC-05:00") != null);
     }
 
     test "formatDigitsWithCommas works" {
