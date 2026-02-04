@@ -106,7 +106,8 @@ fn runSqliteQuery(ctx: Context, db_path: []const u8) ![]u8 {
     var result = std.process.run(ctx.temp_allocator, ctx.io, .{
         .argv = argv[0..],
         .environ_map = ctx.environ_map,
-        .max_output_bytes = 64 * 1024 * 1024,
+        .stdout_limit = .limited(64 * 1024 * 1024),
+        .stderr_limit = .limited(64 * 1024 * 1024),
     }) catch |err| {
         if (err == error.FileNotFound) {
             std.log.err("zed: sqlite3 CLI not found; install sqlite3 to enable Zed ingestion", .{});
