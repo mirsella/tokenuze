@@ -7,7 +7,7 @@ const provider = @import("provider.zig");
 const MessageDeduper = provider.MessageDeduper;
 
 const ProviderExports = provider.makeProvider(.{
-    .name = "opencode",
+    .scope = .opencode,
     .sessions_dir_suffix = "/.local/share/opencode/storage/session",
     .legacy_fallback_model = null,
     .fallback_pricing = &.{},
@@ -193,7 +193,7 @@ const MessageRecord = struct {
             .model = event_model,
             .usage = usage,
             .is_fallback = false,
-            .display_input_tokens = provider.ParseContext.computeDisplayInput(usage),
+            .display_input_tokens = provider.computeDisplayInput(usage),
         };
         try self.sink.emit(self.io, event);
     }
