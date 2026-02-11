@@ -225,17 +225,17 @@ fn formatTimestampForLocalTimezone(io: std.Io, allocator: std.mem.Allocator, tim
     const month = @as(u8, @intCast(local_tm.tm_mon + 1));
     const day = @as(u8, @intCast(local_tm.tm_mday));
 
-    const tz_minutes = if (@hasField(c.tm, "tm_gmtoff"))
-        @as(i32, @intCast(@divTrunc(@field(local_tm, "tm_gmtoff"), 60)))
+    const tz_minutes: i32 = if (@hasField(c.tm, "tm_gmtoff"))
+        @intCast(@divTrunc(@field(local_tm, "tm_gmtoff"), 60))
     else if (@hasField(c.tm, "__tm_gmtoff"))
-        @as(i32, @intCast(@divTrunc(@field(local_tm, "__tm_gmtoff"), 60)))
+        @intCast(@divTrunc(@field(local_tm, "__tm_gmtoff"), 60))
     else blk: {
         var utc_tm: c.tm = undefined;
         gmtimeSafe(&t_value, &utc_tm) catch break :blk default_timezone_offset_minutes;
         const local_secs = tmToUnixSeconds(local_tm);
         const utc_secs = tmToUnixSeconds(utc_tm);
         const delta = local_secs - utc_secs;
-        break :blk @as(i32, @intCast(@divTrunc(delta, 60)));
+        break :blk @intCast(@divTrunc(delta, 60));
     };
 
     var tz_buf: [16]u8 = undefined;
@@ -264,9 +264,8 @@ pub fn formatTimezoneLabelAlloc(io: std.Io, allocator: std.mem.Allocator, offset
 
 fn detectPosixTimezoneMinutes(io: std.Io) !i32 {
     const now = currentUnixSeconds(io);
-    const TimeT = c.time_t;
-    const casted = std.math.cast(TimeT, @as(i64, @intCast(now))) orelse return TimezoneError.TimezoneUnavailable;
-    var t_value: TimeT = casted;
+    const casted = std.math.cast(c.time_t, @as(i64, @intCast(now))) orelse return TimezoneError.TimezoneUnavailable;
+    var t_value: c.time_t = casted;
 
     var local_tm: c.tm = undefined;
     if (c.localtime_r(&t_value, &local_tm) == null) return TimezoneError.TimezoneUnavailable;
@@ -298,7 +297,7 @@ fn detectWindowsTimezoneMinutes() !i32 {
     } else {
         return TimezoneError.TimezoneUnavailable;
     }
-    return -@as(i32, @intCast(@divTrunc(offset_seconds, 60)));
+    return -@divTrunc(offset_seconds, 60);
 }
 
 fn tmToUnixSeconds(tm_value: c.tm) i64 {
