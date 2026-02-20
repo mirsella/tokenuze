@@ -188,13 +188,6 @@ const MessageRecord = struct {
         const millis = self.timestamp_ms orelse return;
         const model_name = self.model_name orelse return;
 
-        if (self.deduper) |deduper| {
-            if (self.message_id) |message_id| {
-                const key = messageDeduperKey(self.session_label, message_id);
-                if (!(try deduper.mark(self.io, key))) return;
-            }
-        }
-
         const event_model = model_name;
         self.model_name = null;
 
@@ -219,6 +212,14 @@ const MessageRecord = struct {
             .is_fallback = false,
             .display_input_tokens = provider.computeDisplayInput(usage),
         };
+
+        if (self.deduper) |deduper| {
+            if (self.message_id) |message_id| {
+                const key = messageDeduperKey(self.session_label, message_id);
+                if (!(try deduper.mark(self.io, key))) return;
+            }
+        }
+
         try self.sink.emit(self.io, event);
     }
 };
@@ -484,11 +485,6 @@ fn parseSqliteRow(
     const model_name = readSqliteString(row, "model_name") orelse return;
     const timestamp_ms = readSqliteU64(row, "timestamp_ms") orelse return;
 
-    if (deduper) |seen| {
-        const dedupe_key = messageDeduperKey(session_label, message_id);
-        if (!(try seen.mark(io, dedupe_key))) return;
-    }
-
     const counts = TokenCounts{
         .input = readSqliteU64(row, "input_tokens") orelse 0,
         .output = readSqliteU64(row, "output_tokens") orelse 0,
@@ -517,6 +513,12 @@ fn parseSqliteRow(
         .is_fallback = false,
         .display_input_tokens = provider.computeDisplayInput(usage),
     };
+
+    if (deduper) |seen| {
+        const dedupe_key = messageDeduperKey(session_label, message_id);
+        if (!(try seen.mark(io, dedupe_key))) return;
+    }
+
     try sink.emit(io, event);
 }
 
@@ -664,6 +666,35 @@ fn sqliteRowsFixtureJson() []const u8 {
     ;
 }
 
+fn sqliteRowsSameMessageZeroThenNonZeroJson() []const u8 {
+    return
+        \\[
+        \\  {
+        \\    "message_id": "msg_same",
+        \\    "session_id": "ses_fixture_one",
+        \\    "timestamp_ms": 1759302005000,
+        \\    "model_name": "grok-code",
+        \\    "input_tokens": 0,
+        \\    "output_tokens": 0,
+        \\    "reasoning_tokens": 0,
+        \\    "cache_read_tokens": 0,
+        \\    "cache_write_tokens": 0
+        \\  },
+        \\  {
+        \\    "message_id": "msg_same",
+        \\    "session_id": "ses_fixture_one",
+        \\    "timestamp_ms": 1759302600000,
+        \\    "model_name": "grok-code",
+        \\    "input_tokens": 10,
+        \\    "output_tokens": 2,
+        \\    "reasoning_tokens": 1,
+        \\    "cache_read_tokens": 3,
+        \\    "cache_write_tokens": 0
+        \\  }
+        \\]
+    ;
+}
+
 test "opencode parser emits assistant usage events" {
     const allocator = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -770,6 +801,39 @@ test "opencode sqlite parser dedupes repeated rows" {
     );
 
     try std.testing.expectEqual(@as(usize, 2), events.items.len);
+}
+
+test "opencode sqlite deduper keeps later non-zero usage event" {
+    const allocator = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const worker_allocator = arena_state.allocator();
+
+    var events: std.ArrayList(model.TokenUsageEvent) = .empty;
+    defer events.deinit(worker_allocator);
+    var sink_adapter = provider.EventListCollector.init(&events, worker_allocator);
+    const sink = sink_adapter.asSink();
+
+    var deduper = try MessageDeduper.init(worker_allocator);
+    defer deduper.deinit();
+
+    try parseSqliteRowsJson(
+        worker_allocator,
+        std.testing.io,
+        0,
+        &deduper,
+        sink,
+        sqliteRowsSameMessageZeroThenNonZeroJson(),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), events.items.len);
+    const event = events.items[0];
+    try std.testing.expectEqualStrings("ses_fixture_one", event.session_id);
+    try std.testing.expectEqualStrings("grok-code", event.model);
+    try std.testing.expectEqual(@as(u64, 10), event.usage.input_tokens);
+    try std.testing.expectEqual(@as(u64, 2), event.usage.output_tokens);
+    try std.testing.expectEqual(@as(u64, 1), event.usage.reasoning_output_tokens);
+    try std.testing.expectEqual(@as(u64, 3), event.usage.cached_input_tokens);
 }
 
 test "opencode message parser handles large documents" {
