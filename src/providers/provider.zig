@@ -1358,11 +1358,7 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
                     _ = extra_arena_state.reset(.retain_capacity);
 
                     const basename = std.fs.path.basename(absolute_path);
-                    const extension = std.fs.path.extension(basename);
-                    const session_slice = if (extension.len > 0 and basename.len > extension.len)
-                        basename[0 .. basename.len - extension.len]
-                    else
-                        basename;
+                    const session_slice = std.fs.path.stem(basename);
                     const maybe_session_id = duplicateNonEmpty(extra_allocator, session_slice) catch {
                         continue;
                     };
