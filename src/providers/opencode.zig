@@ -5,6 +5,7 @@ const model = @import("../model.zig");
 const RawUsage = model.RawTokenUsage;
 const provider = @import("provider.zig");
 const MessageDeduper = provider.MessageDeduper;
+const log = std.log.scoped(.provider_opencode);
 
 const ProviderExports = provider.makeProvider(.{
     .scope = .opencode,
@@ -570,6 +571,12 @@ fn runSqliteQuery(
         else => 255,
     };
     if (exit_code != 0) {
+        const stderr = std.mem.trim(u8, result.stderr, " \r\n\t");
+        if (stderr.len > 0) {
+            log.warn("sqlite3 query failed for '{s}' (exit {d}): {s}", .{ db_path, exit_code, stderr });
+        } else {
+            log.warn("sqlite3 query failed for '{s}' (exit {d})", .{ db_path, exit_code });
+        }
         allocator.free(result.stdout);
         return error.SqliteFailed;
     }
