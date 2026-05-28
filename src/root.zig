@@ -17,7 +17,6 @@ const amp = @import("providers/amp.zig");
 const claude = @import("providers/claude.zig");
 const codex = @import("providers/codex.zig");
 const crush = @import("providers/crush.zig");
-const gemini = @import("providers/gemini.zig");
 const opencode = @import("providers/opencode.zig");
 const provider = @import("providers/provider.zig");
 const zed = @import("providers/zed.zig");
@@ -94,13 +93,6 @@ pub const providers = [_]ProviderSpec{
         .collect = amp.collect,
         .load_pricing = amp.loadPricingData,
         .path_hint = amp.sessionsPath,
-    },
-    .{
-        .name = "gemini",
-        .phase_label = "collect_gemini",
-        .collect = gemini.collect,
-        .load_pricing = gemini.loadPricingData,
-        .path_hint = gemini.sessionsPath,
     },
     .{
         .name = "opencode",

@@ -1424,9 +1424,9 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
                 .cached_input_cost_per_m = 1,
                 .output_cost_per_m = 1,
             };
-            try parser.insertPricingEntries("gemini/gemini-flash-latest", pricing_entry);
+            try parser.insertPricingEntries("claude/claude-3-5-sonnet", pricing_entry);
 
-            try std.testing.expect(pricing.get("gemini/gemini-flash-latest") != null);
+            try std.testing.expect(pricing.get("claude/claude-3-5-sonnet") != null);
         }
 
         test "usage descriptors map and accumulate token fields" {

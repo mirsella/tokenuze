@@ -14,7 +14,6 @@ The output is a table or JSON, suitable for dashboards.
 - [Claude Code](https://www.claude.com/product/claude-code)
 - [Codex CLI](https://developers.openai.com/codex/cli/)
 - [Crush](https://github.com/charmbracelet/crush): project-based (supports recursive crawling with `-r`)
-- [Gemini CLI](https://geminicli.com/)
 - [Opencode](https://opencode.ai/)
 - [Zed](https://zed.dev/)
 
