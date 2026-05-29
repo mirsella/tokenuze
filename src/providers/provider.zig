@@ -1191,6 +1191,7 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
                     const relative_path = std.mem.sliceTo(entry.path, 0);
                     if (!std.mem.endsWith(u8, relative_path, json_ext)) continue;
                     const copy = try shared_allocator.dupe(u8, relative_path);
+                    errdefer shared_allocator.free(copy);
                     try relative_paths.append(shared_allocator, copy);
                 }
             }
@@ -1211,6 +1212,7 @@ pub fn Provider(comptime cfg: ProviderConfig) type {
                         shared_allocator.free(absolute_path);
                         continue;
                     };
+                    errdefer shared_allocator.free(absolute_path);
                     file.close(io);
                     try extra_paths.append(shared_allocator, absolute_path);
                 }
